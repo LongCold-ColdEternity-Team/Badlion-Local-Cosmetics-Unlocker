@@ -1,0 +1,4 @@
+#include "resource.h"
+
+IDR_AGENT_DLL RCDATA "bin\\blc_unlock_agent.dll"
+IDR_TARGET_CLASSES RCDATA "target-classes.txt"

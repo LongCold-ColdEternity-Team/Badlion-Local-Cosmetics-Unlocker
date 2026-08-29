@@ -1,0 +1,24 @@
+# Build and diagnostic output
+bin/
+asar_extract/
+*.obj
+*.res
+*.log
+
+# Local captures and reverse-engineering evidence
+*.png
+*.dmp
+*.heapdump
+
+# IDE and operating-system files
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+Desktop.ini
+
+# Keep the packaged single-file release in source control
+!dist/
+!dist/BadlionUnlockUI.exe
