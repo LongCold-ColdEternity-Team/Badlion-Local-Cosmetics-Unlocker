@@ -2,6 +2,8 @@
 
 开发者：ColdEternity Team
 
+当前版本：`v1.1.0`
+
 原始仓库：<https://github.com/LongCold-ColdEternity-Team/Badlion-Local-Cosmetics-Unlocker>
 
 作者 QQ：`3442312505`
@@ -26,6 +28,18 @@
    ```
 
 3. 注入成功后，在游戏菜单打开 `Cosmetics`，进入 `All Cosmetics`。页面会读取完整目录，点击任意有资源预览的饰品即可在右侧本地模型显示。
+
+## 本地选择保存
+
+注入后，程序会自动记录当前处于启用状态的本地饰品。下次启动游戏并再次注入时，会按“饰品类型 + 饰品 ID”自动恢复，无需重新打开每个分类选择。
+
+配置保存在：
+
+```text
+%LOCALAPPDATA%\ColdEternityTeam\BadlionLocalCosmetics\selection-v1.txt
+```
+
+选择变化后约 1 秒内自动写入。删除该文件即可清除已保存的本地选择；该文件不包含账号令牌或登录信息。
 
 命令行调试版本也支持显式指定 PID：
 

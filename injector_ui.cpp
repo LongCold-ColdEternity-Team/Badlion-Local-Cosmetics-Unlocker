@@ -271,7 +271,7 @@ InjectResult injectDll(DWORD pid, const std::wstring& dllPath, DWORD timeoutMs) 
         return result;
     }
     result.success = true;
-    result.detail = L"DLL 已加载。打开 Cosmetics，即可使用本地饰品目录。";
+    result.detail = L"DLL 已加载；本地饰品选择会自动保存并在下次注入时恢复。";
     return result;
 }
 
@@ -365,8 +365,8 @@ void paint(AppState* app) {
 
     drawText(dc, L"Badlion 本地饰品注入器", makeRect(36, 28, 570, 58), app->titleFont, kText,
              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    drawText(dc, L"ColdEternity Team  ·  适用于 Badlion Client 1.8.9，仅当前客户端显示", makeRect(36, 62, 570, 84),
-             app->smallFont, kMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    drawText(dc, std::wstring(L"ColdEternity Team  ·  v") + APP_VERSION_W + L"  ·  适用于 Badlion Client 1.8.9，仅当前客户端显示", makeRect(36, 62, 570, 84),
+              app->smallFont, kMuted, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     const RECT targetCard = makeRect(36, 100, 570, 220);
     fillRoundRect(dc, targetCard, kSurface);
@@ -401,6 +401,8 @@ void paint(AppState* app) {
              payloadReady ? kText : kDanger, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     drawText(dc, payloadReady ? L"已嵌入并就绪" : L"内嵌资源不可用", makeRect(260, 270, 424, 310), app->smallFont,
              payloadReady ? kAccent : kDanger, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    drawText(dc, L"本地饰品选择：自动保存 / 自动恢复", makeRect(36, 311, 570, 332), app->smallFont, kMuted,
+             DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     const bool injectDisabled = app->busy || !app->pid || !payloadReady;
     drawButton(dc, injectRect(), app->busy ? L"正在注入，请稍候..." : L"注入并解锁", app->buttonFont,
@@ -619,7 +621,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     const int height = desired.bottom - desired.top;
     const int x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
     const int y = (GetSystemMetrics(SM_CYSCREEN) - height) / 2;
-    HWND window = CreateWindowExW(0, kWindowClass, L"Badlion 本地饰品注入器",
+    const std::wstring windowTitle = std::wstring(L"Badlion 本地饰品注入器 v") + APP_VERSION_W;
+    HWND window = CreateWindowExW(0, kWindowClass, windowTitle.c_str(),
                                   WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                                   x, y, width, height, nullptr, nullptr, instance, nullptr);
     if (!window) return 2;

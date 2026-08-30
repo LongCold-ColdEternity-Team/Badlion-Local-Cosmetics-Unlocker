@@ -1,4 +1,38 @@
 #include "resource.h"
+#include <windows.h>
 
 IDR_AGENT_DLL RCDATA "bin\\blc_unlock_agent.dll"
 IDR_TARGET_CLASSES RCDATA "target-classes.txt"
+
+1 VERSIONINFO
+FILEVERSION APP_VERSION_COMMAS
+PRODUCTVERSION APP_VERSION_COMMAS
+FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+FILEFLAGS VS_FF_DEBUG
+#else
+FILEFLAGS 0x0L
+#endif
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404B0"
+        BEGIN
+            VALUE "CompanyName", "ColdEternity Team\0"
+            VALUE "FileDescription", "Badlion Local Cosmetics Unlocker\0"
+            VALUE "FileVersion", APP_VERSION_A "\0"
+            VALUE "InternalName", "BadlionUnlockUI\0"
+            VALUE "LegalCopyright", "Copyright (c) 2026 ColdEternity Team\0"
+            VALUE "OriginalFilename", "BadlionUnlockUI.exe\0"
+            VALUE "ProductName", "Badlion Local Cosmetics Unlocker\0"
+            VALUE "ProductVersion", APP_VERSION_A "\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END

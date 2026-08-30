@@ -7,10 +7,32 @@
 #include <filesystem>
 #include <algorithm>
 #include <sstream>
+#include <set>
+#include <system_error>
 
 namespace {
 HMODULE g_module = nullptr;
 std::wstring g_logPath;
+std::wstring g_selectionPath;
+jobject g_persistentCatalog = nullptr;
+
+struct SelectionKey {
+    std::string type;
+    jint id = 0;
+
+    bool operator<(const SelectionKey& other) const {
+        return type < other.type || (type == other.type && id < other.id);
+    }
+
+    bool operator==(const SelectionKey& other) const {
+        return type == other.type && id == other.id;
+    }
+};
+
+using SelectionSet = std::set<SelectionKey>;
+SelectionSet g_selectionToRestore;
+bool g_hasSavedSelection = false;
+bool g_selectionPrepared = false;
 
 void logLine(const std::string& line) {
     std::ofstream file(g_logPath, std::ios::app);
@@ -43,6 +65,257 @@ bool clearException(JNIEnv* env, const char* where) {
     }
     logLine(std::string("JNI exception at ") + where + (detail.empty() ? "" : ": " + detail));
     return true;
+}
+
+void initializeSelectionPath() {
+    std::vector<wchar_t> localAppData(32768);
+    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData.data(),
+                                                  static_cast<DWORD>(localAppData.size()));
+    if (length == 0 || length >= localAppData.size()) {
+        logLine("LOCALAPPDATA is unavailable; selection persistence disabled");
+        return;
+    }
+
+    const std::filesystem::path directory = std::filesystem::path(localAppData.data()) /
+        L"ColdEternityTeam" / L"BadlionLocalCosmetics";
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    if (error) {
+        logLine("selection directory creation failed: " + error.message());
+        return;
+    }
+    g_selectionPath = (directory / L"selection-v1.txt").wstring();
+    logLine("selection persistence ready");
+}
+
+bool loadSelection(SelectionSet& selection) {
+    selection.clear();
+    if (g_selectionPath.empty()) return false;
+    std::ifstream input{std::filesystem::path(g_selectionPath)};
+    if (!input) return false;
+
+    std::string line;
+    if (!std::getline(input, line)) return false;
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line != "BLC_LOCAL_COSMETICS_V1") {
+        logLine("selection file has an unsupported format");
+        return false;
+    }
+
+    while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line.front() == '#') continue;
+        const size_t separator = line.find('=');
+        if (separator == std::string::npos || separator == 0 || separator + 1 >= line.size()) continue;
+        try {
+            size_t consumed = 0;
+            const int id = std::stoi(line.substr(separator + 1), &consumed);
+            if (consumed != line.size() - separator - 1 || id < 0) continue;
+            selection.insert({line.substr(0, separator), static_cast<jint>(id)});
+        } catch (...) {
+            continue;
+        }
+    }
+    return true;
+}
+
+bool saveSelection(const SelectionSet& selection) {
+    if (g_selectionPath.empty()) return false;
+    const std::filesystem::path destination(g_selectionPath);
+    const std::filesystem::path temporary = destination.wstring() + L".tmp";
+    {
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output) return false;
+        output << "BLC_LOCAL_COSMETICS_V1\n";
+        output << "# One active local cosmetic per TYPE=ID line.\n";
+        for (const auto& item : selection) output << item.type << '=' << item.id << '\n';
+        output.flush();
+        if (!output.good()) return false;
+    }
+    if (!MoveFileExW(temporary.c_str(), destination.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    return true;
+}
+
+struct CosmeticAccess {
+    jclass listClass = nullptr;
+    jclass cosmeticClass = nullptr;
+    jclass typeClass = nullptr;
+    jmethodID listSize = nullptr;
+    jmethodID listGet = nullptr;
+    jmethodID typeName = nullptr;
+    jmethodID isActive = nullptr;
+    jmethodID setActive = nullptr;
+    jfieldID cosmeticId = nullptr;
+    jfieldID cosmeticType = nullptr;
+};
+
+bool initializeCosmeticAccess(JNIEnv* env, CosmeticAccess& access) {
+    access.listClass = env->FindClass("java/util/List");
+    access.cosmeticClass = env->FindClass("net/badlion/a/aCV");
+    access.typeClass = env->FindClass("net/badlion/a/aNI");
+    if (!access.listClass || !access.cosmeticClass || !access.typeClass) {
+        clearException(env, "selection persistence classes");
+        return false;
+    }
+    access.listSize = env->GetMethodID(access.listClass, "size", "()I");
+    access.listGet = env->GetMethodID(access.listClass, "get", "(I)Ljava/lang/Object;");
+    access.typeName = env->GetMethodID(access.typeClass, "name", "()Ljava/lang/String;");
+    access.isActive = env->GetMethodID(access.cosmeticClass, "isActive", "()Z");
+    access.setActive = env->GetMethodID(access.cosmeticClass, "setActive", "(Z)V");
+    access.cosmeticId = env->GetFieldID(access.cosmeticClass, "cosmeticId", "I");
+    access.cosmeticType = env->GetFieldID(access.cosmeticClass, "cosmeticType", "Lnet/badlion/a/aNI;");
+    if (clearException(env, "selection persistence members") || !access.listSize || !access.listGet ||
+        !access.typeName || !access.isActive || !access.setActive || !access.cosmeticId || !access.cosmeticType) {
+        return false;
+    }
+    return true;
+}
+
+void releaseCosmeticAccess(JNIEnv* env, CosmeticAccess& access) {
+    if (access.listClass) env->DeleteLocalRef(access.listClass);
+    if (access.cosmeticClass) env->DeleteLocalRef(access.cosmeticClass);
+    if (access.typeClass) env->DeleteLocalRef(access.typeClass);
+}
+
+bool readCosmeticKey(JNIEnv* env, const CosmeticAccess& access, jobject cosmetic, SelectionKey& key) {
+    jobject type = env->GetObjectField(cosmetic, access.cosmeticType);
+    jstring name = type ? static_cast<jstring>(env->CallObjectMethod(type, access.typeName)) : nullptr;
+    if (clearException(env, "read cosmetic selection key") || !type || !name) {
+        if (name) env->DeleteLocalRef(name);
+        if (type) env->DeleteLocalRef(type);
+        return false;
+    }
+    key.type = jstringToUtf8(env, name);
+    key.id = env->GetIntField(cosmetic, access.cosmeticId);
+    env->DeleteLocalRef(name);
+    env->DeleteLocalRef(type);
+    return !clearException(env, "read cosmetic id") && !key.type.empty() && key.id >= 0;
+}
+
+bool captureActiveSelection(JNIEnv* env, jobject catalog, SelectionSet& selection) {
+    selection.clear();
+    if (!catalog) return false;
+    CosmeticAccess access;
+    if (!initializeCosmeticAccess(env, access)) {
+        releaseCosmeticAccess(env, access);
+        return false;
+    }
+    const jint count = env->CallIntMethod(catalog, access.listSize);
+    if (clearException(env, "selection catalog size")) {
+        releaseCosmeticAccess(env, access);
+        return false;
+    }
+    for (jint i = 0; i < count; ++i) {
+        jobject cosmetic = env->CallObjectMethod(catalog, access.listGet, i);
+        if (clearException(env, "selection catalog get")) {
+            if (cosmetic) env->DeleteLocalRef(cosmetic);
+            releaseCosmeticAccess(env, access);
+            return false;
+        }
+        if (cosmetic && env->IsInstanceOf(cosmetic, access.cosmeticClass) &&
+            env->CallBooleanMethod(cosmetic, access.isActive) == JNI_TRUE) {
+            SelectionKey key;
+            if (!clearException(env, "cosmetic isActive") && readCosmeticKey(env, access, cosmetic, key)) {
+                selection.insert(std::move(key));
+            }
+        } else {
+            clearException(env, "cosmetic isActive");
+        }
+        if (cosmetic) env->DeleteLocalRef(cosmetic);
+    }
+    releaseCosmeticAccess(env, access);
+    return true;
+}
+
+bool applySavedSelection(JNIEnv* env, jobject catalog, const SelectionSet& selection) {
+    if (!catalog) return false;
+    CosmeticAccess access;
+    if (!initializeCosmeticAccess(env, access)) {
+        releaseCosmeticAccess(env, access);
+        return false;
+    }
+    const jint count = env->CallIntMethod(catalog, access.listSize);
+    if (clearException(env, "restore catalog size")) {
+        releaseCosmeticAccess(env, access);
+        return false;
+    }
+    size_t restored = 0;
+    for (jint i = 0; i < count; ++i) {
+        jobject cosmetic = env->CallObjectMethod(catalog, access.listGet, i);
+        if (clearException(env, "restore catalog get")) {
+            if (cosmetic) env->DeleteLocalRef(cosmetic);
+            releaseCosmeticAccess(env, access);
+            return false;
+        }
+        if (cosmetic && env->IsInstanceOf(cosmetic, access.cosmeticClass)) {
+            SelectionKey key;
+            if (readCosmeticKey(env, access, cosmetic, key)) {
+                const bool active = selection.find(key) != selection.end();
+                env->CallVoidMethod(cosmetic, access.setActive, active ? JNI_TRUE : JNI_FALSE);
+                if (!clearException(env, "cosmetic setActive") && active) ++restored;
+            }
+        }
+        if (cosmetic) env->DeleteLocalRef(cosmetic);
+    }
+    releaseCosmeticAccess(env, access);
+    logLine("SELECTION_RESTORE requested=" + std::to_string(selection.size()) +
+            " matched=" + std::to_string(restored));
+    return true;
+}
+
+void prepareSelectionPersistence(JNIEnv* env, jobject catalog) {
+    if (!catalog || g_persistentCatalog || g_selectionPrepared) return;
+    g_hasSavedSelection = loadSelection(g_selectionToRestore);
+    g_selectionPrepared = true;
+    if (g_hasSavedSelection && !applySavedSelection(env, catalog, g_selectionToRestore)) {
+        logLine("SELECTION_RESTORE failed");
+    }
+}
+
+void finalizeSelectionPersistence(JNIEnv* env, jobject catalog) {
+    if (!catalog || g_persistentCatalog) return;
+    if (!g_selectionPrepared) prepareSelectionPersistence(env, catalog);
+    if (g_hasSavedSelection && !applySavedSelection(env, catalog, g_selectionToRestore)) {
+        logLine("SELECTION_RESTORE final pass failed");
+    }
+    g_persistentCatalog = env->NewGlobalRef(catalog);
+    if (!g_persistentCatalog) {
+        clearException(env, "selection catalog global reference");
+        return;
+    }
+
+    SelectionSet current;
+    if (captureActiveSelection(env, catalog, current)) {
+        if (!g_hasSavedSelection && saveSelection(current)) {
+            logLine("SELECTION_SAVE initial count=" + std::to_string(current.size()));
+        }
+    }
+}
+
+void monitorSelection(JNIEnv* env) {
+    if (!g_persistentCatalog) return;
+    SelectionSet previous;
+    if (!captureActiveSelection(env, g_persistentCatalog, previous)) return;
+    if (!saveSelection(previous)) {
+        logLine("SELECTION_SAVE monitor baseline failed");
+    }
+    logLine("SELECTION_MONITOR started count=" + std::to_string(previous.size()));
+    while (true) {
+        Sleep(750);
+        SelectionSet current;
+        if (!captureActiveSelection(env, g_persistentCatalog, current)) continue;
+        if (current == previous) continue;
+        if (saveSelection(current)) {
+            logLine("SELECTION_SAVE changed count=" + std::to_string(current.size()));
+            previous = std::move(current);
+        } else {
+            logLine("SELECTION_SAVE failed");
+        }
+    }
 }
 
 void reflectClass(JNIEnv* env, const std::string& binaryName) {
@@ -371,6 +644,7 @@ void inspectCosmeticsManager(JNIEnv* env, jobject manager) {
             if (!clearException(env, "response.b.buL")) {
                 dumpList(env, "response.b.buL", list);
                 if (list) {
+                    prepareSelectionPersistence(env, list);
                     jclass userClass = env->FindClass("net/badlion/a/aDp");
                     jmethodID userCtor = userClass ? env->GetMethodID(userClass, "<init>", "(Ljava/util/List;)V") : nullptr;
                     jmethodID install = env->GetMethodID(klass, "a", "(Lnet/badlion/a/aDp;)V");
@@ -399,6 +673,7 @@ void inspectCosmeticsManager(JNIEnv* env, jobject manager) {
                         clearException(env, "aDp constructor or manager setter");
                     }
                     if (userClass) env->DeleteLocalRef(userClass);
+                    finalizeSelectionPersistence(env, list);
                     env->DeleteLocalRef(list);
                 }
             }
@@ -573,6 +848,7 @@ void runAgent() {
     GetModuleFileNameW(g_module, modulePath, MAX_PATH);
     g_logPath = (std::filesystem::path(modulePath).parent_path() / L"blc_unlock_agent.log").wstring();
     logLine("agent loaded");
+    initializeSelectionPath();
     HMODULE jvm = nullptr;
     for (int i = 0; i < 100 && !jvm; ++i) { jvm = GetModuleHandleW(L"jvm.dll"); if (!jvm) Sleep(100); }
     if (!jvm) { logLine("jvm.dll not found"); return; }
@@ -631,6 +907,7 @@ void runAgent() {
     else clearException(env, "aCY class for heap probe");
     if (managerClass) env->DeleteLocalRef(managerClass);
     logLine("diagnostic reflection complete");
+    monitorSelection(env);
     if (attached) vms[0]->DetachCurrentThread();
 }
 
