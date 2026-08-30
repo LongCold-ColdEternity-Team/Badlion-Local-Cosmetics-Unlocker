@@ -2,7 +2,7 @@
 
 开发者：ColdEternity Team
 
-当前版本：`v1.1.1`
+当前版本：`v1.1.2`
 
 原始仓库：<https://github.com/LongCold-ColdEternity-Team/Badlion-Local-Cosmetics-Unlocker>
 

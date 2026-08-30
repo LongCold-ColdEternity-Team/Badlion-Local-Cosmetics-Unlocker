@@ -198,9 +198,17 @@ bool hasAgentLoaded(DWORD pid, const std::wstring& agentPath) {
         const DWORD count = std::min<DWORD>(bytes / sizeof(HMODULE), static_cast<DWORD>(modules.size()));
         for (DWORD i = 0; i < count; ++i) {
             wchar_t name[MAX_PATH]{};
-            if (GetModuleBaseNameW(process, modules[i], name, MAX_PATH) > 0 && lower(name) == expected) {
-                found = true;
-                break;
+            if (GetModuleBaseNameW(process, modules[i], name, MAX_PATH) > 0) {
+                const std::wstring loaded = lower(name);
+                // Payloads use a content hash in their temporary filename. Treat
+                // older payloads from this tool as loaded too, preventing a second
+                // agent from being injected into the same JVM after an upgrade.
+                if (loaded == expected ||
+                    (loaded.rfind(L"blc_unlock_agent_", 0) == 0 &&
+                     loaded.size() > 20 && loaded.compare(loaded.size() - 4, 4, L".dll") == 0)) {
+                    found = true;
+                    break;
+                }
             }
         }
     }
@@ -453,7 +461,7 @@ void refreshTarget(AppState* app, bool userInitiated) {
         app->detail = userInitiated ? L"未找到游戏，请等待 Badlion 1.8.9 完全启动。" : L"等待 Badlion 1.8.9 游戏进程...";
     } else if (hasAgentLoaded(pid, app->dllPath)) {
         app->state = UiState::AlreadyLoaded;
-        app->detail = L"当前进程已经注入，可直接打开 Cosmetics。";
+        app->detail = L"当前进程已经注入；更新版本需重启游戏后再注入。";
     } else {
         app->state = UiState::Ready;
         app->detail = L"目标与 DLL 均已就绪。";
