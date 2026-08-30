@@ -76,7 +76,15 @@ bool inject(DWORD pid, const std::wstring& dllPath, DWORD timeoutMs) {
     if (!WriteProcessMemory(process, remote, dllPath.c_str(), bytes, &written) || written != bytes) {
         std::wcerr << L"WriteProcessMemory failed: " << GetLastError() << L"\n"; VirtualFreeEx(process, remote, 0, MEM_RELEASE); CloseHandle(process); return false;
     }
-    auto loadLibrary = reinterpret_cast<LPTHREAD_START_ROUTINE>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW"));
+    HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+    auto loadLibrary = kernel32 ? reinterpret_cast<LPTHREAD_START_ROUTINE>(
+        GetProcAddress(kernel32, "LoadLibraryW")) : nullptr;
+    if (!loadLibrary) {
+        std::wcerr << L"LoadLibraryW address lookup failed\n";
+        VirtualFreeEx(process, remote, 0, MEM_RELEASE);
+        CloseHandle(process);
+        return false;
+    }
     HANDLE thread = CreateRemoteThread(process, nullptr, 0, loadLibrary, remote, 0, nullptr);
     if (!thread) { std::wcerr << L"CreateRemoteThread failed: " << GetLastError() << L"\n"; VirtualFreeEx(process, remote, 0, MEM_RELEASE); CloseHandle(process); return false; }
     const DWORD waitResult = WaitForSingleObject(thread, timeoutMs); DWORD module = 0; GetExitCodeThread(thread, &module);

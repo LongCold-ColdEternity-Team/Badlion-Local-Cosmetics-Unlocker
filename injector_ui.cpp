@@ -249,8 +249,16 @@ InjectResult injectDll(DWORD pid, const std::wstring& dllPath, DWORD timeoutMs) 
         CloseHandle(process);
         return result;
     }
-    auto loadLibrary = reinterpret_cast<LPTHREAD_START_ROUTINE>(
-        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW"));
+    HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+    auto loadLibrary = kernel32 ? reinterpret_cast<LPTHREAD_START_ROUTINE>(
+        GetProcAddress(kernel32, "LoadLibraryW")) : nullptr;
+    if (!loadLibrary) {
+        result.error = ERROR_PROC_NOT_FOUND;
+        result.detail = L"无法定位 LoadLibraryW。";
+        VirtualFreeEx(process, remote, 0, MEM_RELEASE);
+        CloseHandle(process);
+        return result;
+    }
     HANDLE thread = CreateRemoteThread(process, nullptr, 0, loadLibrary, remote, 0, nullptr);
     if (!thread) {
         result.error = GetLastError();
@@ -599,10 +607,12 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
 }
 }
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
-    if (auto setDpi = reinterpret_cast<BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT)>(
-            GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext"))) {
-        setDpi(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In_ int showCommand) {
+    if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
+        if (auto setDpi = reinterpret_cast<BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT)>(
+                GetProcAddress(user32, "SetProcessDpiAwarenessContext"))) {
+            setDpi(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
     }
     WNDCLASSEXW windowClass{sizeof(windowClass)};
     windowClass.style = CS_HREDRAW | CS_VREDRAW;

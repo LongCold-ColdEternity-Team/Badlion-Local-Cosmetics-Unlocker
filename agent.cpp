@@ -233,6 +233,10 @@ bool captureActiveSelection(JNIEnv* env, jobject catalog, SelectionSet& selectio
 
 bool applySavedSelection(JNIEnv* env, jobject catalog, const SelectionSet& selection) {
     if (!catalog) return false;
+    if (selection.empty()) {
+        logLine("SELECTION_RESTORE requested=0 matched=0");
+        return true;
+    }
     CosmeticAccess access;
     if (!initializeCosmeticAccess(env, access)) {
         releaseCosmeticAccess(env, access);
@@ -253,10 +257,11 @@ bool applySavedSelection(JNIEnv* env, jobject catalog, const SelectionSet& selec
         }
         if (cosmetic && env->IsInstanceOf(cosmetic, access.cosmeticClass)) {
             SelectionKey key;
-            if (readCosmeticKey(env, access, cosmetic, key)) {
-                const bool active = selection.find(key) != selection.end();
-                env->CallVoidMethod(cosmetic, access.setActive, active ? JNI_TRUE : JNI_FALSE);
-                if (!clearException(env, "cosmetic setActive") && active) ++restored;
+            if (readCosmeticKey(env, access, cosmetic, key) && selection.find(key) != selection.end()) {
+                // setActive(false) also removes catalog entries from some client views.
+                // A fresh process already supplies the correct default for every unsaved item.
+                env->CallVoidMethod(cosmetic, access.setActive, JNI_TRUE);
+                if (!clearException(env, "cosmetic setActive")) ++restored;
             }
         }
         if (cosmetic) env->DeleteLocalRef(cosmetic);
