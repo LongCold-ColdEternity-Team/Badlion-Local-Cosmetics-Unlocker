@@ -33,6 +33,8 @@ using SelectionSet = std::set<SelectionKey>;
 SelectionSet g_selectionToRestore;
 bool g_hasSavedSelection = false;
 bool g_selectionPrepared = false;
+bool g_unlockInstalled = false;
+bool g_catalogReady = false;
 
 void logLine(const std::string& line) {
     std::ofstream file(g_logPath, std::ios::app);
@@ -269,6 +271,38 @@ bool applySavedSelection(JNIEnv* env, jobject catalog, const SelectionSet& selec
     releaseCosmeticAccess(env, access);
     logLine("SELECTION_RESTORE requested=" + std::to_string(selection.size()) +
             " matched=" + std::to_string(restored));
+    return true;
+}
+
+bool activateAllCatalog(JNIEnv* env, jobject catalog) {
+    if (!catalog) return false;
+    CosmeticAccess access;
+    if (!initializeCosmeticAccess(env, access)) {
+        releaseCosmeticAccess(env, access);
+        return false;
+    }
+    const jint count = env->CallIntMethod(catalog, access.listSize);
+    if (clearException(env, "unlock catalog size")) {
+        releaseCosmeticAccess(env, access);
+        return false;
+    }
+    size_t activated = 0;
+    for (jint i = 0; i < count; ++i) {
+        jobject cosmetic = env->CallObjectMethod(catalog, access.listGet, i);
+        if (clearException(env, "unlock catalog get")) {
+            if (cosmetic) env->DeleteLocalRef(cosmetic);
+            releaseCosmeticAccess(env, access);
+            return false;
+        }
+        if (cosmetic && env->IsInstanceOf(cosmetic, access.cosmeticClass)) {
+            env->CallVoidMethod(cosmetic, access.setActive, JNI_TRUE);
+            if (!clearException(env, "unlock cosmetic setActive")) ++activated;
+        }
+        if (cosmetic) env->DeleteLocalRef(cosmetic);
+    }
+    releaseCosmeticAccess(env, access);
+    logLine("UNLOCK_ACTIVE_ALL count=" + std::to_string(activated));
+    g_catalogReady = activated != 0;
     return true;
 }
 
@@ -650,27 +684,24 @@ void inspectCosmeticsManager(JNIEnv* env, jobject manager) {
                 dumpList(env, "response.b.buL", list);
                 if (list) {
                     prepareSelectionPersistence(env, list);
+                    // The owning wrapper is built from active catalog objects. Mark
+                    // the full catalog active before constructing it so every item
+                    // is present in the local "Your Cosmetics" list.
+                    activateAllCatalog(env, list);
                     jclass userClass = env->FindClass("net/badlion/a/aDp");
                     jmethodID userCtor = userClass ? env->GetMethodID(userClass, "<init>", "(Ljava/util/List;)V") : nullptr;
-                    jmethodID install = env->GetMethodID(klass, "a", "(Lnet/badlion/a/aDp;)V");
-                    if (userCtor && install) {
+                    if (userCtor) {
                         jobject allOwned = env->NewObject(userClass, userCtor, list);
                         if (!clearException(env, "new aDp(all cosmetics)") && allOwned) {
                             logLine("UNLOCK_BUILD aDp from catalog");
-                            env->CallVoidMethod(manager, install, allOwned);
-                            if (!clearException(env, "aCY.a(aDp)")) logLine("UNLOCK_INSTALL manager setter succeeded");
                             jmethodID responseMethod = env->GetMethodID(klass, "bsd", "()Lnet/badlion/clientcommon/type/cosmetics/response/a;");
                             jobject responseObject = responseMethod ? env->CallObjectMethod(manager, responseMethod) : nullptr;
                             if (!clearException(env, "aCY.bsd after install") && responseObject) {
                                 installOwnedCatalog(env, responseObject, list, allOwned);
-                                jclass responseClass = env->GetObjectClass(responseObject);
-                                jmethodID clearCache = responseClass ? env->GetMethodID(responseClass, "gt", "()V") : nullptr;
-                                jmethodID markUpdate = responseClass ? env->GetMethodID(responseClass, "ht", "(Z)V") : nullptr;
-                                if (clearCache) { env->CallVoidMethod(responseObject, clearCache); clearException(env, "response.a.gt"); }
-                                if (markUpdate) { env->CallVoidMethod(responseObject, markUpdate, JNI_TRUE); clearException(env, "response.a.ht"); }
-                                logLine("UNLOCK_REFRESH response cache");
+                                if (g_catalogReady) g_unlockInstalled = true;
+                                logLine("UNLOCK_DIRECT response state");
                                 inspectCosmeticsPublicApi(env, responseObject);
-                                if (responseClass) env->DeleteLocalRef(responseClass); env->DeleteLocalRef(responseObject);
+                                env->DeleteLocalRef(responseObject);
                             }
                             env->DeleteLocalRef(allOwned);
                         }
@@ -908,8 +939,15 @@ void runAgent() {
     }
     if (cosmeticsResponse) env->DeleteLocalRef(cosmeticsResponse);
     jclass managerClass = env->FindClass("net/badlion/a/aCY");
-    if (jvmti && managerClass) enumerateManagerInstances(env, jvmti, managerClass);
-    else clearException(env, "aCY class for heap probe");
+    if (jvmti && managerClass) {
+        // Badlion creates the manager before the catalog response arrives. Retry
+        // the same manager probe until the 424-item catalog is available.
+        for (int attempt = 0; attempt < 60 && !g_unlockInstalled; ++attempt) {
+            enumerateManagerInstances(env, jvmti, managerClass);
+            if (!g_unlockInstalled) Sleep(1000);
+        }
+        if (!g_unlockInstalled) logLine("UNLOCK_TIMEOUT catalog response not ready");
+    } else clearException(env, "aCY class for heap probe");
     if (managerClass) env->DeleteLocalRef(managerClass);
     logLine("diagnostic reflection complete");
     monitorSelection(env);
