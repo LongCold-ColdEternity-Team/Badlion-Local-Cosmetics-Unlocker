@@ -15,6 +15,7 @@ HMODULE g_module = nullptr;
 std::wstring g_logPath;
 std::wstring g_selectionPath;
 jobject g_persistentCatalog = nullptr;
+jobject g_persistentOwnedWrapper = nullptr;
 
 struct SelectionKey {
     std::string type;
@@ -35,6 +36,8 @@ bool g_hasSavedSelection = false;
 bool g_selectionPrepared = false;
 bool g_unlockInstalled = false;
 bool g_catalogReady = false;
+
+bool expandOwnedWrapper(JNIEnv* env, jobject ownedObject, jobject catalogList);
 
 void logLine(const std::string& line) {
     std::ofstream file(g_logPath, std::ios::app);
@@ -399,6 +402,13 @@ void monitorSelection(JNIEnv* env) {
         SelectionSet current;
         if (!captureActiveSelection(env, g_persistentCatalog, current)) continue;
         if (current == previous) continue;
+        // The catalog owns the active flags, but the render wrapper is a
+        // separate snapshot. Rebuild it whenever the user changes a toggle
+        // so newly enabled cosmetics appear and disabled ones disappear.
+        if (g_persistentOwnedWrapper &&
+            !expandOwnedWrapper(env, g_persistentOwnedWrapper, g_persistentCatalog)) {
+            logLine("UNLOCK_RENDER_SYNC failed after selection change");
+        }
         if (saveSelection(current)) {
             logLine("SELECTION_SAVE changed count=" + std::to_string(current.size()));
             previous = std::move(current);
@@ -650,9 +660,10 @@ void inspectUserCosmetics(JNIEnv* env, jobject user) {
 
 void inspectCosmeticsPublicApi(JNIEnv* env, jobject instance);
 
-// aDp's constructor filters on aCV.active. Keep the original wrapper (and
-// therefore its identity used by the UI), but replace its backing containers
-// with the complete catalog so inactive entries remain selectable.
+// aDp is the client-side equipped/render wrapper. The cosmetics screen uses
+// response.cosmetics for the complete catalog, while aDp is expected to
+// contain only entries whose aCV.active flag is set. Keep the original
+// wrapper identity, but rebuild its backing containers from active entries.
 bool expandOwnedWrapper(JNIEnv* env, jobject ownedObject, jobject catalogList) {
     if (!ownedObject || !catalogList) return false;
     jclass wrapperClass = env->GetObjectClass(ownedObject);
@@ -678,14 +689,13 @@ bool expandOwnedWrapper(JNIEnv* env, jobject ownedObject, jobject catalogList) {
     jmethodID listGet = env->GetMethodID(listClass, "get", "(I)Ljava/lang/Object;");
     jmethodID listClear = env->GetMethodID(listClass, "clear", "()V");
     jmethodID listAdd = env->GetMethodID(listClass, "add", "(Ljava/lang/Object;)Z");
-    jmethodID listAddAll = env->GetMethodID(listClass, "addAll", "(Ljava/util/Collection;)Z");
     jmethodID listCtor = env->GetMethodID(arrayListClass, "<init>", "()V");
     jmethodID mapClear = env->GetMethodID(mapClass, "clear", "()V");
     jmethodID mapGet = env->GetMethodID(mapClass, "get", "(Ljava/lang/Object;)Ljava/lang/Object;");
     jmethodID mapPut = env->GetMethodID(mapClass, "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
     jmethodID mapCtor = env->GetMethodID(hashMapClass, "<init>", "()V");
     if (clearException(env, "expand wrapper members") || !listField || !mapField || !typeField ||
-        !listSize || !listGet || !listClear || !listAdd || !listAddAll || !listCtor ||
+        !listSize || !listGet || !listClear || !listAdd || !listCtor ||
         !mapClear || !mapGet || !mapPut || !mapCtor) {
         clearException(env, "expand wrapper members missing");
         env->DeleteLocalRef(cosmeticClass); env->DeleteLocalRef(hashMapClass);
@@ -714,15 +724,6 @@ bool expandOwnedWrapper(JNIEnv* env, jobject ownedObject, jobject catalogList) {
         env->DeleteLocalRef(listClass); env->DeleteLocalRef(wrapperClass);
         return false;
     }
-    env->CallBooleanMethod(ownedList, listAddAll, catalogList);
-    if (clearException(env, "expand wrapper list.addAll")) {
-        env->DeleteLocalRef(ownedMap); env->DeleteLocalRef(ownedList);
-        env->DeleteLocalRef(cosmeticClass); env->DeleteLocalRef(hashMapClass);
-        env->DeleteLocalRef(mapClass); env->DeleteLocalRef(arrayListClass);
-        env->DeleteLocalRef(listClass); env->DeleteLocalRef(wrapperClass);
-        return false;
-    }
-
     env->CallVoidMethod(ownedMap, mapClear);
     if (clearException(env, "expand wrapper map.clear")) {
         env->DeleteLocalRef(ownedMap); env->DeleteLocalRef(ownedList);
@@ -739,6 +740,15 @@ bool expandOwnedWrapper(JNIEnv* env, jobject ownedObject, jobject catalogList) {
         env->DeleteLocalRef(listClass); env->DeleteLocalRef(wrapperClass);
         return false;
     }
+    jmethodID isActive = env->GetMethodID(cosmeticClass, "isActive", "()Z");
+    if (!isActive || clearException(env, "expand wrapper cosmetic isActive")) {
+        env->DeleteLocalRef(ownedMap); env->DeleteLocalRef(ownedList);
+        env->DeleteLocalRef(cosmeticClass); env->DeleteLocalRef(hashMapClass);
+        env->DeleteLocalRef(mapClass); env->DeleteLocalRef(arrayListClass);
+        env->DeleteLocalRef(listClass); env->DeleteLocalRef(wrapperClass);
+        return false;
+    }
+    size_t activeCount = 0;
     size_t indexed = 0;
     for (jint i = 0; i < count; ++i) {
         jobject cosmetic = env->CallObjectMethod(catalogList, listGet, i);
@@ -754,6 +764,29 @@ bool expandOwnedWrapper(JNIEnv* env, jobject ownedObject, jobject catalogList) {
             if (cosmetic) env->DeleteLocalRef(cosmetic);
             continue;
         }
+        const jboolean active = env->CallBooleanMethod(cosmetic, isActive);
+        if (clearException(env, "expand wrapper cosmetic isActive")) {
+            env->DeleteLocalRef(cosmetic);
+            env->DeleteLocalRef(ownedMap); env->DeleteLocalRef(ownedList);
+            env->DeleteLocalRef(cosmeticClass); env->DeleteLocalRef(hashMapClass);
+            env->DeleteLocalRef(mapClass); env->DeleteLocalRef(arrayListClass);
+            env->DeleteLocalRef(listClass); env->DeleteLocalRef(wrapperClass);
+            return false;
+        }
+        if (active != JNI_TRUE) {
+            env->DeleteLocalRef(cosmetic);
+            continue;
+        }
+        env->CallBooleanMethod(ownedList, listAdd, cosmetic);
+        if (clearException(env, "expand wrapper active list.add")) {
+            env->DeleteLocalRef(cosmetic);
+            env->DeleteLocalRef(ownedMap); env->DeleteLocalRef(ownedList);
+            env->DeleteLocalRef(cosmeticClass); env->DeleteLocalRef(hashMapClass);
+            env->DeleteLocalRef(mapClass); env->DeleteLocalRef(arrayListClass);
+            env->DeleteLocalRef(listClass); env->DeleteLocalRef(wrapperClass);
+            return false;
+        }
+        ++activeCount;
         jobject type = env->GetObjectField(cosmetic, typeField);
         jobject bucket = type ? env->CallObjectMethod(ownedMap, mapGet, type) : nullptr;
         if (clearException(env, "expand wrapper map.get")) bucket = nullptr;
@@ -773,12 +806,14 @@ bool expandOwnedWrapper(JNIEnv* env, jobject ownedObject, jobject catalogList) {
         if (type) env->DeleteLocalRef(type);
         env->DeleteLocalRef(cosmetic);
     }
-    logLine("UNLOCK_EXPAND_WRAPPER list=" + std::to_string(count) + " indexed=" + std::to_string(indexed));
+    logLine("UNLOCK_RENDER_SYNC catalog=" + std::to_string(count) +
+            " active=" + std::to_string(activeCount) +
+            " indexed=" + std::to_string(indexed));
     env->DeleteLocalRef(ownedMap); env->DeleteLocalRef(ownedList);
     env->DeleteLocalRef(cosmeticClass); env->DeleteLocalRef(hashMapClass);
     env->DeleteLocalRef(mapClass); env->DeleteLocalRef(arrayListClass);
     env->DeleteLocalRef(listClass); env->DeleteLocalRef(wrapperClass);
-    return indexed == static_cast<size_t>(count);
+    return indexed == activeCount;
 }
 
 // The manager setter updates a separate path in this build. Patch the response
@@ -881,6 +916,13 @@ void inspectCosmeticsManager(JNIEnv* env, jobject manager) {
                         jobject currentUser = currentUserMethod ? env->CallObjectMethod(responseObject, currentUserMethod) : nullptr;
                         if (!clearException(env, "response.a.bwQ before expand") && currentUser) {
                             if (expandOwnedWrapper(env, currentUser, list)) {
+                                if (!g_persistentOwnedWrapper) {
+                                    g_persistentOwnedWrapper = env->NewGlobalRef(currentUser);
+                                    if (!g_persistentOwnedWrapper) {
+                                        clearException(env, "owned wrapper global reference");
+                                        logLine("UNLOCK_RENDER_SYNC wrapper reference failed");
+                                    }
+                                }
                                 installOwnedCatalog(env, responseObject, list, currentUser);
                                 g_catalogReady = true;
                                 g_unlockInstalled = true;
