@@ -274,6 +274,40 @@ bool applySavedSelection(JNIEnv* env, jobject catalog, const SelectionSet& selec
     return true;
 }
 
+bool resetCatalogSelection(JNIEnv* env, jobject catalog) {
+    if (!catalog) return false;
+    CosmeticAccess access;
+    if (!initializeCosmeticAccess(env, access)) {
+        releaseCosmeticAccess(env, access);
+        return false;
+    }
+    const jint count = env->CallIntMethod(catalog, access.listSize);
+    if (clearException(env, "reset catalog size")) {
+        releaseCosmeticAccess(env, access);
+        return false;
+    }
+    size_t cleared = 0;
+    for (jint i = 0; i < count; ++i) {
+        jobject cosmetic = env->CallObjectMethod(catalog, access.listGet, i);
+        if (clearException(env, "reset catalog get")) {
+            if (cosmetic) env->DeleteLocalRef(cosmetic);
+            releaseCosmeticAccess(env, access);
+            return false;
+        }
+        if (cosmetic && env->IsInstanceOf(cosmetic, access.cosmeticClass)) {
+            const jboolean active = env->CallBooleanMethod(cosmetic, access.isActive);
+            if (!clearException(env, "reset cosmetic isActive") && active == JNI_TRUE) {
+                env->CallVoidMethod(cosmetic, access.setActive, JNI_FALSE);
+                if (!clearException(env, "reset cosmetic setActive")) ++cleared;
+            }
+        }
+        if (cosmetic) env->DeleteLocalRef(cosmetic);
+    }
+    releaseCosmeticAccess(env, access);
+    logLine("SELECTION_RESET cleared=" + std::to_string(cleared));
+    return true;
+}
+
 bool activateAllCatalog(JNIEnv* env, jobject catalog) {
     if (!catalog) return false;
     CosmeticAccess access;
@@ -309,6 +343,23 @@ bool activateAllCatalog(JNIEnv* env, jobject catalog) {
 void prepareSelectionPersistence(JNIEnv* env, jobject catalog) {
     if (!catalog || g_persistentCatalog || g_selectionPrepared) return;
     g_hasSavedSelection = loadSelection(g_selectionToRestore);
+    if (g_hasSavedSelection) {
+        CosmeticAccess access;
+        if (initializeCosmeticAccess(env, access)) {
+            const jint count = env->CallIntMethod(catalog, access.listSize);
+            if (!clearException(env, "selection migration catalog size") && count > 0 &&
+                g_selectionToRestore.size() >= static_cast<size_t>(count)) {
+                // Versions before the default-off fix persisted every catalog
+                // item as active. Do not resurrect that generated state.
+                logLine("SELECTION_MIGRATE clearing legacy full selection count=" + std::to_string(g_selectionToRestore.size()));
+                g_selectionToRestore.clear();
+                saveSelection(g_selectionToRestore);
+            }
+            releaseCosmeticAccess(env, access);
+        } else {
+            releaseCosmeticAccess(env, access);
+        }
+    }
     g_selectionPrepared = true;
     if (g_hasSavedSelection && !applySavedSelection(env, catalog, g_selectionToRestore)) {
         logLine("SELECTION_RESTORE failed");
@@ -599,6 +650,137 @@ void inspectUserCosmetics(JNIEnv* env, jobject user) {
 
 void inspectCosmeticsPublicApi(JNIEnv* env, jobject instance);
 
+// aDp's constructor filters on aCV.active. Keep the original wrapper (and
+// therefore its identity used by the UI), but replace its backing containers
+// with the complete catalog so inactive entries remain selectable.
+bool expandOwnedWrapper(JNIEnv* env, jobject ownedObject, jobject catalogList) {
+    if (!ownedObject || !catalogList) return false;
+    jclass wrapperClass = env->GetObjectClass(ownedObject);
+    jclass listClass = env->FindClass("java/util/List");
+    jclass arrayListClass = env->FindClass("java/util/ArrayList");
+    jclass mapClass = env->FindClass("java/util/Map");
+    jclass hashMapClass = env->FindClass("java/util/HashMap");
+    jclass cosmeticClass = env->FindClass("net/badlion/a/aCV");
+    if (!wrapperClass || !listClass || !arrayListClass || !mapClass || !hashMapClass || !cosmeticClass) {
+        clearException(env, "expand wrapper classes");
+        if (cosmeticClass) env->DeleteLocalRef(cosmeticClass);
+        if (hashMapClass) env->DeleteLocalRef(hashMapClass);
+        if (mapClass) env->DeleteLocalRef(mapClass);
+        if (arrayListClass) env->DeleteLocalRef(arrayListClass);
+        if (listClass) env->DeleteLocalRef(listClass);
+        if (wrapperClass) env->DeleteLocalRef(wrapperClass);
+        return false;
+    }
+    jfieldID listField = env->GetFieldID(wrapperClass, "cuR", "Ljava/util/List;");
+    jfieldID mapField = env->GetFieldID(wrapperClass, "cuQ", "Ljava/util/Map;");
+    jfieldID typeField = env->GetFieldID(cosmeticClass, "cosmeticType", "Lnet/badlion/a/aNI;");
+    jmethodID listSize = env->GetMethodID(listClass, "size", "()I");
+    jmethodID listGet = env->GetMethodID(listClass, "get", "(I)Ljava/lang/Object;");
+    jmethodID listClear = env->GetMethodID(listClass, "clear", "()V");
+    jmethodID listAdd = env->GetMethodID(listClass, "add", "(Ljava/lang/Object;)Z");
+    jmethodID listAddAll = env->GetMethodID(listClass, "addAll", "(Ljava/util/Collection;)Z");
+    jmethodID listCtor = env->GetMethodID(arrayListClass, "<init>", "()V");
+    jmethodID mapClear = env->GetMethodID(mapClass, "clear", "()V");
+    jmethodID mapGet = env->GetMethodID(mapClass, "get", "(Ljava/lang/Object;)Ljava/lang/Object;");
+    jmethodID mapPut = env->GetMethodID(mapClass, "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
+    jmethodID mapCtor = env->GetMethodID(hashMapClass, "<init>", "()V");
+    if (clearException(env, "expand wrapper members") || !listField || !mapField || !typeField ||
+        !listSize || !listGet || !listClear || !listAdd || !listAddAll || !listCtor ||
+        !mapClear || !mapGet || !mapPut || !mapCtor) {
+        clearException(env, "expand wrapper members missing");
+        env->DeleteLocalRef(cosmeticClass); env->DeleteLocalRef(hashMapClass);
+        env->DeleteLocalRef(mapClass); env->DeleteLocalRef(arrayListClass);
+        env->DeleteLocalRef(listClass); env->DeleteLocalRef(wrapperClass);
+        return false;
+    }
+
+    jobject ownedList = env->GetObjectField(ownedObject, listField);
+    jobject ownedMap = env->GetObjectField(ownedObject, mapField);
+    if (!ownedList || !ownedMap) {
+        clearException(env, "expand wrapper backing fields");
+        if (ownedMap) env->DeleteLocalRef(ownedMap);
+        if (ownedList) env->DeleteLocalRef(ownedList);
+        env->DeleteLocalRef(cosmeticClass); env->DeleteLocalRef(hashMapClass);
+        env->DeleteLocalRef(mapClass); env->DeleteLocalRef(arrayListClass);
+        env->DeleteLocalRef(listClass); env->DeleteLocalRef(wrapperClass);
+        return false;
+    }
+
+    env->CallVoidMethod(ownedList, listClear);
+    if (clearException(env, "expand wrapper list.clear")) {
+        env->DeleteLocalRef(ownedMap); env->DeleteLocalRef(ownedList);
+        env->DeleteLocalRef(cosmeticClass); env->DeleteLocalRef(hashMapClass);
+        env->DeleteLocalRef(mapClass); env->DeleteLocalRef(arrayListClass);
+        env->DeleteLocalRef(listClass); env->DeleteLocalRef(wrapperClass);
+        return false;
+    }
+    env->CallBooleanMethod(ownedList, listAddAll, catalogList);
+    if (clearException(env, "expand wrapper list.addAll")) {
+        env->DeleteLocalRef(ownedMap); env->DeleteLocalRef(ownedList);
+        env->DeleteLocalRef(cosmeticClass); env->DeleteLocalRef(hashMapClass);
+        env->DeleteLocalRef(mapClass); env->DeleteLocalRef(arrayListClass);
+        env->DeleteLocalRef(listClass); env->DeleteLocalRef(wrapperClass);
+        return false;
+    }
+
+    env->CallVoidMethod(ownedMap, mapClear);
+    if (clearException(env, "expand wrapper map.clear")) {
+        env->DeleteLocalRef(ownedMap); env->DeleteLocalRef(ownedList);
+        env->DeleteLocalRef(cosmeticClass); env->DeleteLocalRef(hashMapClass);
+        env->DeleteLocalRef(mapClass); env->DeleteLocalRef(arrayListClass);
+        env->DeleteLocalRef(listClass); env->DeleteLocalRef(wrapperClass);
+        return false;
+    }
+    const jint count = env->CallIntMethod(catalogList, listSize);
+    if (clearException(env, "expand wrapper catalog size")) {
+        env->DeleteLocalRef(ownedMap); env->DeleteLocalRef(ownedList);
+        env->DeleteLocalRef(cosmeticClass); env->DeleteLocalRef(hashMapClass);
+        env->DeleteLocalRef(mapClass); env->DeleteLocalRef(arrayListClass);
+        env->DeleteLocalRef(listClass); env->DeleteLocalRef(wrapperClass);
+        return false;
+    }
+    size_t indexed = 0;
+    for (jint i = 0; i < count; ++i) {
+        jobject cosmetic = env->CallObjectMethod(catalogList, listGet, i);
+        if (clearException(env, "expand wrapper catalog get")) {
+            if (cosmetic) env->DeleteLocalRef(cosmetic);
+            env->DeleteLocalRef(ownedMap); env->DeleteLocalRef(ownedList);
+            env->DeleteLocalRef(cosmeticClass); env->DeleteLocalRef(hashMapClass);
+            env->DeleteLocalRef(mapClass); env->DeleteLocalRef(arrayListClass);
+            env->DeleteLocalRef(listClass); env->DeleteLocalRef(wrapperClass);
+            return false;
+        }
+        if (!cosmetic || !env->IsInstanceOf(cosmetic, cosmeticClass)) {
+            if (cosmetic) env->DeleteLocalRef(cosmetic);
+            continue;
+        }
+        jobject type = env->GetObjectField(cosmetic, typeField);
+        jobject bucket = type ? env->CallObjectMethod(ownedMap, mapGet, type) : nullptr;
+        if (clearException(env, "expand wrapper map.get")) bucket = nullptr;
+        if (!bucket && type) {
+            bucket = env->NewObject(arrayListClass, listCtor);
+            if (bucket) {
+                jobject previous = env->CallObjectMethod(ownedMap, mapPut, type, bucket);
+                clearException(env, "expand wrapper map.put");
+                if (previous) env->DeleteLocalRef(previous);
+            }
+        }
+        if (bucket) {
+            env->CallBooleanMethod(bucket, listAdd, cosmetic);
+            if (!clearException(env, "expand wrapper bucket.add")) ++indexed;
+        }
+        if (bucket) env->DeleteLocalRef(bucket);
+        if (type) env->DeleteLocalRef(type);
+        env->DeleteLocalRef(cosmetic);
+    }
+    logLine("UNLOCK_EXPAND_WRAPPER list=" + std::to_string(count) + " indexed=" + std::to_string(indexed));
+    env->DeleteLocalRef(ownedMap); env->DeleteLocalRef(ownedList);
+    env->DeleteLocalRef(cosmeticClass); env->DeleteLocalRef(hashMapClass);
+    env->DeleteLocalRef(mapClass); env->DeleteLocalRef(arrayListClass);
+    env->DeleteLocalRef(listClass); env->DeleteLocalRef(wrapperClass);
+    return indexed == static_cast<size_t>(count);
+}
+
 // The manager setter updates a separate path in this build. Patch the response
 // object that the cosmetics screen actually queries, while retaining the
 // catalog's original aCV instances and their resource metadata.
@@ -684,31 +866,36 @@ void inspectCosmeticsManager(JNIEnv* env, jobject manager) {
                 dumpList(env, "response.b.buL", list);
                 if (list) {
                     prepareSelectionPersistence(env, list);
-                    // The owning wrapper is built from active catalog objects. Mark
-                    // the full catalog active before constructing it so every item
-                    // is present in the local "Your Cosmetics" list.
-                    activateAllCatalog(env, list);
-                    jclass userClass = env->FindClass("net/badlion/a/aDp");
-                    jmethodID userCtor = userClass ? env->GetMethodID(userClass, "<init>", "(Ljava/util/List;)V") : nullptr;
-                    if (userCtor) {
-                        jobject allOwned = env->NewObject(userClass, userCtor, list);
-                        if (!clearException(env, "new aDp(all cosmetics)") && allOwned) {
-                            logLine("UNLOCK_BUILD aDp from catalog");
-                            jmethodID responseMethod = env->GetMethodID(klass, "bsd", "()Lnet/badlion/clientcommon/type/cosmetics/response/a;");
-                            jobject responseObject = responseMethod ? env->CallObjectMethod(manager, responseMethod) : nullptr;
-                            if (!clearException(env, "aCY.bsd after install") && responseObject) {
-                                installOwnedCatalog(env, responseObject, list, allOwned);
-                                if (g_catalogReady) g_unlockInstalled = true;
+                    // Keep every catalog entry visible, but start with all
+                    // cosmetics disabled. Only the persisted selection is
+                    // re-enabled below.
+                    resetCatalogSelection(env, list);
+                    if (g_hasSavedSelection && !applySavedSelection(env, list, g_selectionToRestore)) {
+                        logLine("SELECTION_RESTORE after reset failed");
+                    }
+                    jmethodID responseMethod = env->GetMethodID(klass, "bsd", "()Lnet/badlion/clientcommon/type/cosmetics/response/a;");
+                    jobject responseObject = responseMethod ? env->CallObjectMethod(manager, responseMethod) : nullptr;
+                    if (!clearException(env, "aCY.bsd after catalog reset") && responseObject) {
+                        jclass responseClass = env->GetObjectClass(responseObject);
+                        jmethodID currentUserMethod = responseClass ? env->GetMethodID(responseClass, "bwQ", "()Lnet/badlion/a/aDp;") : nullptr;
+                        jobject currentUser = currentUserMethod ? env->CallObjectMethod(responseObject, currentUserMethod) : nullptr;
+                        if (!clearException(env, "response.a.bwQ before expand") && currentUser) {
+                            if (expandOwnedWrapper(env, currentUser, list)) {
+                                installOwnedCatalog(env, responseObject, list, currentUser);
+                                g_catalogReady = true;
+                                g_unlockInstalled = true;
                                 logLine("UNLOCK_DIRECT response state");
                                 inspectCosmeticsPublicApi(env, responseObject);
-                                env->DeleteLocalRef(responseObject);
+                            } else {
+                                logLine("UNLOCK_EXPAND_WRAPPER failed");
                             }
-                            env->DeleteLocalRef(allOwned);
+                        } else {
+                            logLine("UNLOCK_CURRENT_USER missing");
                         }
-                    } else {
-                        clearException(env, "aDp constructor or manager setter");
+                        if (currentUser) env->DeleteLocalRef(currentUser);
+                        if (responseClass) env->DeleteLocalRef(responseClass);
+                        env->DeleteLocalRef(responseObject);
                     }
-                    if (userClass) env->DeleteLocalRef(userClass);
                     finalizeSelectionPersistence(env, list);
                     env->DeleteLocalRef(list);
                 }
