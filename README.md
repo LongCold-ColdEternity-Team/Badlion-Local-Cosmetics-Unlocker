@@ -2,7 +2,7 @@
 
 开发者：ColdEternity Team
 
-当前版本：`v1.2.0`
+当前版本：`v1.3.0`
 
 原始仓库：<https://github.com/LongCold-ColdEternity-Team/Badlion-Local-Cosmetics-Unlocker>
 
@@ -14,7 +14,7 @@
 
 ## 使用
 
-1. 通过 Lunar Client 启动 Badlion 1.8.9，等游戏窗口标题出现 `Badlion Minecraft Client v4... (1.8.9)`。
+1. 通过 Lunar Client 启动 Badlion 1.8.9，等待游戏窗口出现。注入器会同时检查窗口标题、窗口类名以及 Java 进程路径，兼容标题变化、大小写变化、边框/无边框窗口和 Lunar JRE 安装位置变化。
 2. 双击运行图形注入器：
 
    `dist\BadlionUnlockUI.exe`
@@ -49,7 +49,7 @@
 .\bin\BadlionUnlockInjector.exe --pid <javaw PID>
 ```
 
-如果提示没有目标 JVM，先等游戏窗口完全出现再运行。若提示 `Agent already loaded`，说明当前 JVM 已经注入；重启游戏后可再次使用。
+如果提示没有目标 JVM，先等游戏窗口完全出现再运行，并可点击“重新检测”或按 `F5`。若提示 `Agent already loaded`，说明当前 JVM 已经注入；重启游戏后可再次使用。
 
 ## 构建
 
@@ -65,7 +65,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 
 实际使用只需要复制 `dist\BadlionUnlockUI.exe`；`bin` 目录是构建和命令行调试产物。
 
-运行日志写入 `bin\blc_unlock_agent.log`。该实现针对 Badlion Client `v4.4.4-f8775e4-PRODUCTION4 (1.8.9)` 的运行时类名和目录结构，客户端版本变化后需要重新定位字段/方法。
+运行日志写入注入 DLL 所在目录的 `blc_unlock_agent.log`。单文件 UI 会将 DLL 释放到 `%TEMP%\BadlionUnlockInjector`，点击“打开日志”时会自动定位该目录、程序目录及 `bin` 目录中的日志；若系统没有 `.log` 文件关联，会回退到记事本打开。该实现针对 Badlion Client `v4.4.4-f8775e4-PRODUCTION4 (1.8.9)` 的运行时类名和目录结构，客户端版本变化后需要重新定位字段/方法。
 
 ## 二次修改与分发
 

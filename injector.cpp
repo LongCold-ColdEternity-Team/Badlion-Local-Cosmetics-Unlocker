@@ -19,6 +19,42 @@ std::wstring lower(std::wstring value) {
 bool containsInsensitive(const std::wstring& value, const std::wstring& needle) {
     return lower(value).find(lower(needle)) != std::wstring::npos;
 }
+
+std::wstring normalizedPath(std::wstring value) {
+    std::replace(value.begin(), value.end(), L'/', L'\\');
+    return lower(std::move(value));
+}
+
+bool isJavaImage(const std::wstring& path) {
+    const std::wstring value = normalizedPath(path);
+    const size_t slash = value.find_last_of(L'\\');
+    const std::wstring name = slash == std::wstring::npos ? value : value.substr(slash + 1);
+    return name == L"java.exe" || name == L"javaw.exe";
+}
+
+bool pathSuggestsBadlion(const std::wstring& path) {
+    const std::wstring value = normalizedPath(path);
+    return containsInsensitive(value, L"badlion client") ||
+           containsInsensitive(value, L"badlionclient") ||
+           containsInsensitive(value, L"lunar client") ||
+           containsInsensitive(value, L"lunarclient");
+}
+
+bool titleHas18(const std::wstring& title) {
+    return containsInsensitive(title, L"1.8.9") ||
+           containsInsensitive(title, L"1_8_9") ||
+           containsInsensitive(title, L"1-8-9");
+}
+
+bool titleSuggestsBadlion(const std::wstring& title) {
+    return containsInsensitive(title, L"badlion");
+}
+
+bool gameWindowClass(const std::wstring& className) {
+    return containsInsensitive(className, L"lwjgl") ||
+           containsInsensitive(className, L"glfw") ||
+           containsInsensitive(className, L"minecraft");
+}
 std::wstring processPath(DWORD pid) {
     HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!process) return {};
@@ -40,14 +76,20 @@ bool hasAgentLoaded(DWORD pid, const std::wstring& agentPath) {
     }
     CloseHandle(process); return found;
 }
-bool hasBadlionWindow(DWORD pid) {
-    struct Context { DWORD pid; bool found; } context{pid, false};
+bool hasBadlionWindow(DWORD pid, const std::wstring& path) {
+    struct Context { DWORD pid; bool pathSignal; bool found; } context{pid, pathSuggestsBadlion(path), false};
     EnumWindows([](HWND hwnd, LPARAM param) -> BOOL {
         auto* context = reinterpret_cast<Context*>(param); DWORD owner = 0;
         GetWindowThreadProcessId(hwnd, &owner);
-        if (owner != context->pid || !IsWindowVisible(hwnd)) return TRUE;
-        wchar_t title[512]{}; GetWindowTextW(hwnd, title, static_cast<int>(std::size(title)));
-        if (containsInsensitive(title, L"Badlion Minecraft Client") || containsInsensitive(title, L"Badlion Client v4")) {
+        if (owner != context->pid || (!IsWindowVisible(hwnd) && !IsIconic(hwnd))) return TRUE;
+        wchar_t title[1024]{}; GetWindowTextW(hwnd, title, static_cast<int>(std::size(title)));
+        wchar_t className[128]{}; GetClassNameW(hwnd, className, static_cast<int>(std::size(className)));
+        const std::wstring titleValue = title;
+        const std::wstring classValue = className;
+        const bool launcher = containsInsensitive(titleValue, L"launcher") || containsInsensitive(titleValue, L"updater");
+        if (!launcher && ((titleSuggestsBadlion(titleValue) && (titleHas18(titleValue) || context->pathSignal)) ||
+                          (titleHas18(titleValue) && (context->pathSignal || gameWindowClass(classValue))) ||
+                          (context->pathSignal && gameWindowClass(classValue)))) {
             context->found = true; return FALSE;
         }
         return TRUE;
@@ -60,7 +102,10 @@ DWORD findTarget() {
     if (Process32FirstW(snapshot, &entry)) do {
         if (_wcsicmp(entry.szExeFile, L"javaw.exe") != 0 && _wcsicmp(entry.szExeFile, L"java.exe") != 0) continue;
         const std::wstring path = processPath(entry.th32ProcessID);
-        if (containsInsensitive(path, L"Badlion Client\\Data\\jdk-17.0.13-jre\\bin") && hasBadlionWindow(entry.th32ProcessID)) {
+        // Process image queries may be denied for elevated JVMs. The snapshot
+        // already confirmed java/javaw.exe, so rely on the window evidence when
+        // the full path is unavailable.
+        if ((path.empty() || isJavaImage(path)) && hasBadlionWindow(entry.th32ProcessID, path)) {
             result = entry.th32ProcessID; break;
         }
     } while (Process32NextW(snapshot, &entry));
@@ -111,7 +156,7 @@ int wmain(int argc, wchar_t** argv) {
     if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) { std::wcerr << L"DLL not found: " << dllPath << L"\n"; return 3; }
     if (!pid) { pid = findTarget(); if (!pid) { std::wcerr << L"No active Badlion 1.8.9 JVM found.\n"; return 4; } }
     const std::wstring path = processPath(pid); std::wcout << L"Target PID " << pid << L"\nPath: " << path << L"\n";
-    if (!containsInsensitive(path, L"Badlion Client\\Data\\jdk-17.0.13-jre\\bin")) { std::wcerr << L"PID is not the expected Badlion Java 17 process.\n"; return 5; }
+    if (!path.empty() && !isJavaImage(path)) { std::wcerr << L"PID is not a Java process.\n"; return 5; }
     if (hasAgentLoaded(pid, dllPath)) { std::wcout << L"Agent already loaded.\n"; return 0; }
     std::wcout << L"Loading " << dllPath << L" ...\n";
     if (!inject(pid, dllPath, timeoutMs)) return 6;

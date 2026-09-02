@@ -72,6 +72,8 @@ struct InjectResult {
     std::wstring detail;
 };
 
+std::wstring win32Error(DWORD code);
+
 bool readResourceBytes(int id, const void*& data, DWORD& size) {
     HMODULE module = GetModuleHandleW(nullptr);
     HRSRC resource = FindResourceW(module, MAKEINTRESOURCEW(id), RT_RCDATA);
@@ -134,6 +136,42 @@ bool containsInsensitive(const std::wstring& value, const std::wstring& needle) 
     return lower(value).find(lower(needle)) != std::wstring::npos;
 }
 
+std::wstring normalizedPath(std::wstring value) {
+    std::replace(value.begin(), value.end(), L'/', L'\\');
+    return lower(std::move(value));
+}
+
+bool isJavaImage(const std::wstring& path) {
+    const std::wstring value = normalizedPath(path);
+    const size_t slash = value.find_last_of(L'\\');
+    const std::wstring name = slash == std::wstring::npos ? value : value.substr(slash + 1);
+    return name == L"java.exe" || name == L"javaw.exe";
+}
+
+bool pathSuggestsBadlion(const std::wstring& path) {
+    const std::wstring value = normalizedPath(path);
+    return containsInsensitive(value, L"badlion client") ||
+           containsInsensitive(value, L"badlionclient") ||
+           containsInsensitive(value, L"lunar client") ||
+           containsInsensitive(value, L"lunarclient");
+}
+
+bool titleHas18(const std::wstring& title) {
+    return containsInsensitive(title, L"1.8.9") ||
+           containsInsensitive(title, L"1_8_9") ||
+           containsInsensitive(title, L"1-8-9");
+}
+
+bool titleSuggestsBadlion(const std::wstring& title) {
+    return containsInsensitive(title, L"badlion") || containsInsensitive(title, L"badlion client");
+}
+
+bool isGameWindowClass(const std::wstring& className) {
+    return containsInsensitive(className, L"lwjgl") ||
+           containsInsensitive(className, L"glfw") ||
+           containsInsensitive(className, L"minecraft");
+}
+
 std::wstring processPath(DWORD pid) {
     HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!process) return {};
@@ -145,18 +183,100 @@ std::wstring processPath(DWORD pid) {
     return result;
 }
 
-std::wstring badlionWindowTitle(DWORD pid) {
-    struct Context { DWORD pid; std::wstring title; } context{pid, {}};
+std::wstring absolutePath(const std::wstring& value) {
+    if (value.empty()) return {};
+    std::vector<wchar_t> buffer(32768);
+    DWORD length = GetFullPathNameW(value.c_str(), static_cast<DWORD>(buffer.size()), buffer.data(), nullptr);
+    if (!length || length >= buffer.size()) return value;
+    return std::wstring(buffer.data(), length);
+}
+
+bool regularFileExists(const std::wstring& value) {
+    const DWORD attributes = GetFileAttributesW(value.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+std::wstring executableDirectory() {
+    std::vector<wchar_t> buffer(32768);
+    const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+    if (!length || length >= buffer.size()) return {};
+    const std::wstring module(buffer.data(), length);
+    const size_t slash = module.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? std::wstring{} : module.substr(0, slash);
+}
+
+std::wstring locateLogFile(const AppState& app) {
+    std::vector<std::wstring> candidates;
+    if (!app.logPath.empty()) candidates.push_back(app.logPath);
+    const std::wstring exeDir = executableDirectory();
+    if (!exeDir.empty()) {
+        candidates.push_back(exeDir + L"\\blc_unlock_agent.log");
+        candidates.push_back(exeDir + L"\\bin\\blc_unlock_agent.log");
+    }
+    wchar_t temp[MAX_PATH]{};
+    if (GetTempPathW(MAX_PATH, temp)) {
+        candidates.push_back(std::wstring(temp) + L"BadlionUnlockInjector\\blc_unlock_agent.log");
+    }
+    for (const auto& candidate : candidates) {
+        const std::wstring path = absolutePath(candidate);
+        if (regularFileExists(path)) return path;
+    }
+    return {};
+}
+
+bool launchNotepad(const std::wstring& path) {
+    std::wstring command = L"notepad.exe \"" + path + L"\"";
+    std::vector<wchar_t> commandLine(command.begin(), command.end());
+    commandLine.push_back(L'\0');
+    STARTUPINFOW startup{sizeof(startup)};
+    PROCESS_INFORMATION process{};
+    const BOOL created = CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, FALSE,
+                                        CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, &startup, &process);
+    if (!created) return false;
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    return true;
+}
+
+void openLog(AppState* app) {
+    const std::wstring path = locateLogFile(*app);
+    if (path.empty()) {
+        app->detail = L"日志尚未生成，请先完成一次注入。";
+        MessageBoxW(app->window, app->detail.c_str(), L"打开日志", MB_OK | MB_ICONINFORMATION);
+        InvalidateRect(app->window, nullptr, FALSE);
+        return;
+    }
+    HINSTANCE result = ShellExecuteW(app->window, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(result) <= 32 && !launchNotepad(path)) {
+        app->detail = L"无法打开日志文件：" + win32Error(GetLastError());
+        MessageBoxW(app->window, app->detail.c_str(), L"打开日志失败", MB_OK | MB_ICONERROR);
+    } else {
+        app->detail = L"已打开日志：" + path;
+    }
+    InvalidateRect(app->window, nullptr, FALSE);
+}
+
+std::wstring badlionWindowTitle(DWORD pid, const std::wstring& path) {
+    struct Context { DWORD pid; bool pathKnown; bool pathSignal; std::wstring title; } context{pid, !path.empty(), pathSuggestsBadlion(path), {}};
     EnumWindows([](HWND hwnd, LPARAM param) -> BOOL {
         auto* context = reinterpret_cast<Context*>(param);
         DWORD owner = 0;
         GetWindowThreadProcessId(hwnd, &owner);
-        if (owner != context->pid || !IsWindowVisible(hwnd)) return TRUE;
-        wchar_t title[512]{};
+        if (owner != context->pid || (!IsWindowVisible(hwnd) && !IsIconic(hwnd))) return TRUE;
+        wchar_t title[1024]{};
         GetWindowTextW(hwnd, title, static_cast<int>(std::size(title)));
         const std::wstring value = title;
-        if (containsInsensitive(value, L"Badlion Minecraft Client") && containsInsensitive(value, L"1.8.9")) {
-            context->title = value;
+        wchar_t className[128]{};
+        GetClassNameW(hwnd, className, static_cast<int>(std::size(className)));
+        const std::wstring classValue = className;
+        const bool launcherTitle = containsInsensitive(value, L"launcher") ||
+                                   containsInsensitive(value, L"updater");
+        const bool accepted = !launcherTitle &&
+            ((titleSuggestsBadlion(value) && (titleHas18(value) || context->pathSignal)) ||
+             (context->pathSignal && isGameWindowClass(classValue)) ||
+             (!context->pathKnown && titleHas18(value) && isGameWindowClass(classValue)));
+        if (accepted) {
+            context->title = value.empty() ? (classValue.empty() ? L"Badlion 游戏窗口" : classValue) : value;
             return FALSE;
         }
         return TRUE;
@@ -169,18 +289,27 @@ DWORD findTarget(std::wstring& title, std::wstring& path) {
     if (snapshot == INVALID_HANDLE_VALUE) return 0;
     PROCESSENTRY32W entry{sizeof(entry)};
     DWORD result = 0;
+    int bestScore = -1;
     if (Process32FirstW(snapshot, &entry)) {
         do {
             if (_wcsicmp(entry.szExeFile, L"javaw.exe") != 0 && _wcsicmp(entry.szExeFile, L"java.exe") != 0) continue;
             std::wstring candidatePath = processPath(entry.th32ProcessID);
-            if (!containsInsensitive(candidatePath, L"Badlion Client\\Data\\jdk-") ||
-                !containsInsensitive(candidatePath, L"\\bin\\java")) continue;
-            std::wstring candidateTitle = badlionWindowTitle(entry.th32ProcessID);
+            // QueryFullProcessImageName can fail for a JVM running at a higher
+            // integrity level. In that case the executable name and window
+            // evidence are still sufficient to identify the target.
+            if (!candidatePath.empty() && !isJavaImage(candidatePath)) continue;
+            std::wstring candidateTitle = badlionWindowTitle(entry.th32ProcessID, candidatePath);
             if (candidateTitle.empty()) continue;
-            result = entry.th32ProcessID;
-            title = std::move(candidateTitle);
-            path = std::move(candidatePath);
-            break;
+            const bool pathSignal = pathSuggestsBadlion(candidatePath);
+            const int score = (titleHas18(candidateTitle) ? 8 : 0) +
+                              (titleSuggestsBadlion(candidateTitle) ? 6 : 0) +
+                              (pathSignal ? 3 : 0);
+            if (score > bestScore) {
+                bestScore = score;
+                result = entry.th32ProcessID;
+                title = std::move(candidateTitle);
+                path = std::move(candidatePath);
+            }
         } while (Process32NextW(snapshot, &entry));
     }
     CloseHandle(snapshot);
@@ -573,10 +702,7 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
                 switch (hitTest(point)) {
                     case HitTarget::Refresh: refreshTarget(app, true); break;
                     case HitTarget::Inject: startInjection(app); break;
-                    case HitTarget::OpenLog: {
-                        if (!app->logPath.empty()) ShellExecuteW(hwnd, L"open", app->logPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-                        break;
-                    }
+                    case HitTarget::OpenLog: openLog(app); break;
                     default: break;
                 }
             }
