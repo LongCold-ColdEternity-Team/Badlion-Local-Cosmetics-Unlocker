@@ -1,0 +1,17 @@
+Captured from test-bin/blc_unlock_agent.log; JVM PID 28548; not the synthetic fixture.
+PUBLIC_LIST i(SPRAY) size=2
+PUBLIC_LIST i(SPRAY) size=2
+SPRAY_CATALOG store=10 registered=253 created=241 total=253
+SELECTION_RESTORE requested=3 matched=3
+SELECTION_RESTORE requested=3 matched=3
+UNLOCK_RESPONSE_SNAPSHOT succeeded total=667
+UNLOCK_DIRECT response state
+SPRAY_OWNERSHIP id=0 allowed=1
+SPRAY_OWNERSHIP id=40 allowed=1
+SPRAY_OWNERSHIP id=169 allowed=1
+SPRAY_OWNERSHIP id=252 allowed=1
+SPRAY_OWNERSHIP id=-1 allowed=0
+SPRAY_OWNERSHIP id=1000000 allowed=0
+PUBLIC_LIST i(SPRAY) size=253
+SELECTION_RESTORE requested=3 matched=3
+SELECTION_MONITOR started count=3

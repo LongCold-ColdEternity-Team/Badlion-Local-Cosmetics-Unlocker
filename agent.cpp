@@ -16,6 +16,7 @@ std::wstring g_logPath;
 std::wstring g_selectionPath;
 jobject g_persistentCatalog = nullptr;
 jobject g_persistentOwnedWrapper = nullptr;
+jobject g_persistentManager = nullptr;
 
 struct SelectionKey {
     std::string type;
@@ -70,6 +71,25 @@ bool clearException(JNIEnv* env, const char* where) {
     }
     logLine(std::string("JNI exception at ") + where + (detail.empty() ? "" : ": " + detail));
     return true;
+}
+
+bool synchronizeCosmeticsManager(JNIEnv* env, jobject manager, jobject ownedObject) {
+    if (!manager || !ownedObject) return false;
+    jclass managerClass = env->GetObjectClass(manager);
+    if (!managerClass) {
+        clearException(env, "render sync manager class");
+        return false;
+    }
+    jmethodID install = env->GetMethodID(managerClass, "a", "(Lnet/badlion/a/aDp;)V");
+    if (!install || clearException(env, "render sync manager method")) {
+        env->DeleteLocalRef(managerClass);
+        return false;
+    }
+    env->CallVoidMethod(manager, install, ownedObject);
+    const bool succeeded = !clearException(env, "aCY.a(aDp) render sync");
+    logLine(std::string("UNLOCK_MANAGER_SYNC ") + (succeeded ? "succeeded" : "failed"));
+    env->DeleteLocalRef(managerClass);
+    return succeeded;
 }
 
 void initializeSelectionPath() {
@@ -405,9 +425,13 @@ void monitorSelection(JNIEnv* env) {
         // The catalog owns the active flags, but the render wrapper is a
         // separate snapshot. Rebuild it whenever the user changes a toggle
         // so newly enabled cosmetics appear and disabled ones disappear.
-        if (g_persistentOwnedWrapper &&
-            !expandOwnedWrapper(env, g_persistentOwnedWrapper, g_persistentCatalog)) {
-            logLine("UNLOCK_RENDER_SYNC failed after selection change");
+        if (g_persistentOwnedWrapper) {
+            if (!expandOwnedWrapper(env, g_persistentOwnedWrapper, g_persistentCatalog)) {
+                logLine("UNLOCK_RENDER_SYNC failed after selection change");
+            } else if (g_persistentManager &&
+                       !synchronizeCosmeticsManager(env, g_persistentManager, g_persistentOwnedWrapper)) {
+                logLine("UNLOCK_MANAGER_SYNC failed after selection change");
+            }
         }
         if (saveSelection(current)) {
             logLine("SELECTION_SAVE changed count=" + std::to_string(current.size()));
@@ -493,7 +517,7 @@ void probeJvmti(JavaVM* vm) {
 }
 
 struct HeapProbe {
-    jlong marker = 0x424C43434F534D31LL;
+    jlong marker;
 };
 
 jvmtiIterationControl JNICALL tagHeapObject(jlong, jlong, jlong* tagPtr, void* userData) {
@@ -816,64 +840,7 @@ bool expandOwnedWrapper(JNIEnv* env, jobject ownedObject, jobject catalogList) {
     return indexed == activeCount;
 }
 
-// The manager setter updates a separate path in this build. Patch the response
-// object that the cosmetics screen actually queries, while retaining the
-// catalog's original aCV instances and their resource metadata.
-void installOwnedCatalog(JNIEnv* env, jobject responseObject, jobject catalogList, jobject ownedObject) {
-    if (!responseObject || !catalogList) return;
-    jclass responseClass = env->GetObjectClass(responseObject);
-    jclass listClass = env->FindClass("java/util/List");
-    jclass mapClass = env->FindClass("java/util/Map");
-    if (!responseClass || !listClass) {
-        clearException(env, "install response/list class");
-        if (mapClass) env->DeleteLocalRef(mapClass);
-        if (listClass) env->DeleteLocalRef(listClass);
-        if (responseClass) env->DeleteLocalRef(responseClass);
-        return;
-    }
-
-    jfieldID cosmeticsField = env->GetFieldID(responseClass, "cosmetics", "Ljava/util/List;");
-    jfieldID userField = env->GetFieldID(responseClass, "userCosmetics", "Lnet/badlion/a/aDp;");
-    jfieldID cacheField = env->GetFieldID(responseClass, "ownedCosmeticCache", "Ljava/util/Map;");
-    jobject currentList = cosmeticsField ? env->GetObjectField(responseObject, cosmeticsField) : nullptr;
-    bool installedInPlace = false;
-    if (currentList) {
-        jmethodID clear = env->GetMethodID(listClass, "clear", "()V");
-        jmethodID addAll = env->GetMethodID(listClass, "addAll", "(Ljava/util/Collection;)Z");
-        if (clear && addAll) {
-            env->CallVoidMethod(currentList, clear);
-            if (!clearException(env, "response cosmetics.clear")) {
-                env->CallBooleanMethod(currentList, addAll, catalogList);
-                installedInPlace = !clearException(env, "response cosmetics.addAll");
-            }
-        }
-    }
-    if (!installedInPlace && cosmeticsField) {
-        env->SetObjectField(responseObject, cosmeticsField, catalogList);
-        installedInPlace = !clearException(env, "response cosmetics field install");
-    }
-    logLine(std::string("UNLOCK_RESPONSE_LIST ") + (installedInPlace ? "succeeded" : "failed"));
-
-    if (userField && ownedObject) {
-        env->SetObjectField(responseObject, userField, ownedObject);
-        if (!clearException(env, "response userCosmetics field install")) logLine("UNLOCK_RESPONSE_USER succeeded");
-    }
-    if (cacheField && mapClass) {
-        jobject cache = env->GetObjectField(responseObject, cacheField);
-        if (cache) {
-            jmethodID clear = env->GetMethodID(mapClass, "clear", "()V");
-            if (clear) {
-                env->CallVoidMethod(cache, clear);
-                if (!clearException(env, "response ownedCosmeticCache.clear")) logLine("UNLOCK_RESPONSE_CACHE cleared");
-            }
-            env->DeleteLocalRef(cache);
-        }
-    }
-    if (currentList) env->DeleteLocalRef(currentList);
-    if (mapClass) env->DeleteLocalRef(mapClass);
-    env->DeleteLocalRef(listClass);
-    env->DeleteLocalRef(responseClass);
-}
+#include "spray_support.inl"
 
 void inspectCosmeticsManager(JNIEnv* env, jobject manager) {
     logLine("COSMETICS_MANAGER_INSTANCE class=" + objectClassName(env, manager));
@@ -898,7 +865,12 @@ void inspectCosmeticsManager(JNIEnv* env, jobject manager) {
             jmethodID latest = bklass ? env->GetMethodID(bklass, "bwR", "()Ljava/util/List;") : nullptr;
             jobject list = all ? env->CallObjectMethod(value, all) : nullptr;
             if (!clearException(env, "response.b.buL")) {
-                dumpList(env, "response.b.buL", list);
+                if (list) {
+                    jobject merged = buildSprayCatalog(env, manager, list);
+                    env->DeleteLocalRef(list);
+                    list = merged;
+                }
+                dumpList(env, "response.b.buL + registered sprays", list);
                 if (list) {
                     prepareSelectionPersistence(env, list);
                     // Keep every catalog entry visible, but start with all
@@ -923,11 +895,23 @@ void inspectCosmeticsManager(JNIEnv* env, jobject manager) {
                                         logLine("UNLOCK_RENDER_SYNC wrapper reference failed");
                                     }
                                 }
-                                installOwnedCatalog(env, responseObject, list, currentUser);
-                                g_catalogReady = true;
-                                g_unlockInstalled = true;
-                                logLine("UNLOCK_DIRECT response state");
-                                inspectCosmeticsPublicApi(env, responseObject);
+                                if (!g_persistentManager) {
+                                    g_persistentManager = env->NewGlobalRef(manager);
+                                    if (!g_persistentManager) {
+                                        clearException(env, "cosmetics manager global reference");
+                                        logLine("UNLOCK_MANAGER_SYNC manager reference failed");
+                                    }
+                                }
+                                if (!synchronizeCosmeticsManager(env, manager, currentUser)) {
+                                    logLine("UNLOCK_MANAGER_SYNC failed during install");
+                                }
+                                if (installOwnedCatalog(env, responseObject, list, currentUser)) {
+                                    g_catalogReady = true;
+                                    g_unlockInstalled = true;
+                                    logLine("UNLOCK_DIRECT response state");
+                                    verifySprayOwnership(env, manager);
+                                    inspectCosmeticsPublicApi(env, responseObject);
+                                }
                             } else {
                                 logLine("UNLOCK_EXPAND_WRAPPER failed");
                             }
@@ -938,7 +922,7 @@ void inspectCosmeticsManager(JNIEnv* env, jobject manager) {
                         if (responseClass) env->DeleteLocalRef(responseClass);
                         env->DeleteLocalRef(responseObject);
                     }
-                    finalizeSelectionPersistence(env, list);
+                    if (g_unlockInstalled) finalizeSelectionPersistence(env, list);
                     env->DeleteLocalRef(list);
                 }
             }
@@ -1033,7 +1017,7 @@ void enumerateCosmeticsInstances(JNIEnv* env, jvmtiEnv* jvmti, jclass klass) {
         const jvmtiError add = jvmti->AddCapabilities(&requested);
         logLine("JVMTI AddCapabilities(tag_objects)=" + std::to_string(add));
     }
-    HeapProbe probe;
+    HeapProbe probe{0x424C43434F534D31LL};
     const jvmtiError iter = jvmti->IterateOverInstancesOfClass(klass, JVMTI_HEAP_OBJECT_EITHER, tagHeapObject, &probe);
     logLine("JVMTI IterateOverInstancesOfClass=" + std::to_string(iter));
     if (iter != JVMTI_ERROR_NONE) return;
@@ -1052,7 +1036,9 @@ void enumerateCosmeticsInstances(JNIEnv* env, jvmtiEnv* jvmti, jclass klass) {
 
 void enumerateManagerInstances(JNIEnv* env, jvmtiEnv* jvmti, jclass klass) {
     if (!jvmti || !klass) return;
-    HeapProbe probe;
+    // Use a distinct tag so response objects collected by the earlier heap
+    // probe cannot be mistaken for a cosmetics manager.
+    HeapProbe probe{0x424C43434F534D32LL};
     const jvmtiError iter = jvmti->IterateOverInstancesOfClass(klass, JVMTI_HEAP_OBJECT_EITHER, tagHeapObject, &probe);
     logLine("JVMTI IterateOverInstancesOfClass(aCY)=" + std::to_string(iter));
     if (iter != JVMTI_ERROR_NONE) return;

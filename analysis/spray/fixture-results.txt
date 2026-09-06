@@ -1,0 +1,38 @@
+**********************************************************************
+** Visual Studio 2026 Developer Command Prompt v18.9.2
+** Copyright (c) 2026 Microsoft Corporation
+**********************************************************************
+fixture_bridge.cpp
+  正在创建库 fixture_bridge.lib 和对象 fixture_bridge.exp
+SPRAY_CATALOG store=1 registered=5 created=2 total=4
+PASS union of store, owned, registered IDs
+PASS merge does not mutate input lists
+PASS reuse original store objects and order
+PASS retain missing owned object metadata
+PASS deduplicate repeated owned entries
+PASS registry name and inactive default
+PASS skip invalid registry ID
+UNLOCK_RESPONSE_SNAPSHOT succeeded total=5
+PASS publish complete snapshot
+PASS publish uses non-aliasing list copy
+PASS owned cache includes inactive sprays
+PASS snapshot state consistent
+PASS active-only wrapper remains active-only
+PASS positive and negative ownership controls
+SPRAY_OWNERSHIP id=0 allowed=1
+SPRAY_OWNERSHIP id=40 allowed=1
+SPRAY_OWNERSHIP id=169 allowed=0
+SPRAY_OWNERSHIP id=252 allowed=1
+SPRAY_OWNERSHIP id=-1 allowed=0
+SPRAY_OWNERSHIP id=1000000 allowed=0
+SPRAY_CATALOG store=4 registered=5 created=0 total=4
+PASS repeated merge does not add duplicate IDs
+PASS bad catalog fails before publishing
+SPRAY_CATALOG waiting for registered resources
+PASS empty registry waits without installing
+PASS null merge inputs fail closed
+PASS null install inputs fail closed
+SPRAY_CATALOG store=0 registered=4096 created=4096 total=4096
+UNLOCK_RESPONSE_SNAPSHOT succeeded total=4096
+PASS large registry local-reference/cache regression
+FIXTURE_OK checks=19; not a game rendering test

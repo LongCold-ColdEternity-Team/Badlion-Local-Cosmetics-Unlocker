@@ -1,0 +1,8 @@
+# Original backups, recovered client bytecode, and machine-local test output.
+# Keep them on disk for rollback/inspection; do not publish with project source.
+baseline/
+probe-bin/
+test-bin/
+fixture-out/
+ui/
+__pycache__/

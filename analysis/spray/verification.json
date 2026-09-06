@@ -1,0 +1,87 @@
+{
+  "recordedAt": "2026-09-06T07:38:16.709517+00:00",
+  "artifacts": {
+    "agent.cpp": {
+      "bytes": 64812,
+      "sha256": "f079ca52fd013555b51664d5e284927e1e28d88a78d8982dd729478cbe1f810d"
+    },
+    "spray_support.inl": {
+      "bytes": 10971,
+      "sha256": "85b1e34c7494efedab518773793b33e3f32d629f2f9f7a37c74524e2f15fc27b"
+    },
+    "README.md": {
+      "bytes": 6334,
+      "sha256": "e057f4bb5a0c3784fa121e9ce14c8391fd70c0fe7f9468cf969d566ffcce8711"
+    },
+    "build.ps1": {
+      "bytes": 1708,
+      "sha256": "89cd4463b0048c0a8fb68ebec9747e2a2948cbded05e09cd2d7476d9c138c418"
+    },
+    "bin/blc_unlock_agent.dll": {
+      "bytes": 439296,
+      "sha256": "da038d1e38244e86e486c69d9e223d085729cfc159891eb5d89486fe869acf2f"
+    },
+    "bin/BadlionUnlockInjector.exe": {
+      "bytes": 311808,
+      "sha256": "2c8ede266655ebd62fa756a6cd6991789fe34ba5f1d16601f0077d2b61f380e3"
+    },
+    "dist/BadlionUnlockUI.exe": {
+      "bytes": 842752,
+      "sha256": "45e7ab957bba4bf4ace0e292137c302733b636e2ca8a0c8798222ebdcd177add"
+    },
+    "target-classes.txt": {
+      "bytes": 23978,
+      "sha256": "a3432c3f623d4c0617419d37c50013b42afad74fb62a0b62979fe62ffb04c047"
+    },
+    "analysis/spray/test-bin/blc_unlock_agent.dll": {
+      "bytes": 439296,
+      "sha256": "da038d1e38244e86e486c69d9e223d085729cfc159891eb5d89486fe869acf2f"
+    }
+  },
+  "embeddedResources": {
+    "101": {
+      "bytes": 439296,
+      "sha256": "da038d1e38244e86e486c69d9e223d085729cfc159891eb5d89486fe869acf2f",
+      "matches": true
+    },
+    "102": {
+      "bytes": 23978,
+      "sha256": "a3432c3f623d4c0617419d37c50013b42afad74fb62a0b62979fe62ffb04c047",
+      "matches": true
+    }
+  },
+  "gameProfileSpraySettings": {
+    "path": "E:\\mc\\Badlion\\BLClient-Mod-Profiles\\New Profile 1.zip",
+    "slots": [
+      "40",
+      "0",
+      "",
+      "",
+      "",
+      ""
+    ],
+    "menuKey": "KEY_U",
+    "wheelKey": "KEY_Y",
+    "disableSprays": {
+      "value": false
+    }
+  },
+  "screenshots": {
+    "01-spray-catalog.png": "739af111a7019bb38f468912076c50c6a9596873952c26b62b8cc6f68a667a09",
+    "02-available-sprays.png": "0663931e535e7e9a91bf76cb8478f6e7ad5523d10927b6a5de4154daf4b70772",
+    "03-black-cat-slot2.png": "f6865f33eb2a9c87ecee398b391c31987cc24d6b1594008cbac0b53bd182a894",
+    "04-wheel-black-cat.png": "cb6f8123a67fb40c34649dd15b037b3084a7f94b9cd6c36ec86e4790ce5e7aca"
+  },
+  "realClientVerified": [
+    "253 owned entries",
+    "sample ownership predicates",
+    "catalog textures",
+    "slot2 ID0 saved via UI",
+    "wheel shows ID0"
+  ],
+  "pending": [
+    "placement/world rendering",
+    "clean restart using only release payload",
+    "other-player visibility not supported by evidence"
+  ]
+}

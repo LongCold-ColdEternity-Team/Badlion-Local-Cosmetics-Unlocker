@@ -1,0 +1,316 @@
+--- baseline/agent.cpp
++++ current/agent.cpp
+@@ -840,64 +840,7 @@
+     return indexed == activeCount;
+ }
+ 
+-// The manager setter updates a separate path in this build. Patch the response
+-// object that the cosmetics screen actually queries, while retaining the
+-// catalog's original aCV instances and their resource metadata.
+-void installOwnedCatalog(JNIEnv* env, jobject responseObject, jobject catalogList, jobject ownedObject) {
+-    if (!responseObject || !catalogList) return;
+-    jclass responseClass = env->GetObjectClass(responseObject);
+-    jclass listClass = env->FindClass("java/util/List");
+-    jclass mapClass = env->FindClass("java/util/Map");
+-    if (!responseClass || !listClass) {
+-        clearException(env, "install response/list class");
+-        if (mapClass) env->DeleteLocalRef(mapClass);
+-        if (listClass) env->DeleteLocalRef(listClass);
+-        if (responseClass) env->DeleteLocalRef(responseClass);
+-        return;
+-    }
+-
+-    jfieldID cosmeticsField = env->GetFieldID(responseClass, "cosmetics", "Ljava/util/List;");
+-    jfieldID userField = env->GetFieldID(responseClass, "userCosmetics", "Lnet/badlion/a/aDp;");
+-    jfieldID cacheField = env->GetFieldID(responseClass, "ownedCosmeticCache", "Ljava/util/Map;");
+-    jobject currentList = cosmeticsField ? env->GetObjectField(responseObject, cosmeticsField) : nullptr;
+-    bool installedInPlace = false;
+-    if (currentList) {
+-        jmethodID clear = env->GetMethodID(listClass, "clear", "()V");
+-        jmethodID addAll = env->GetMethodID(listClass, "addAll", "(Ljava/util/Collection;)Z");
+-        if (clear && addAll) {
+-            env->CallVoidMethod(currentList, clear);
+-            if (!clearException(env, "response cosmetics.clear")) {
+-                env->CallBooleanMethod(currentList, addAll, catalogList);
+-                installedInPlace = !clearException(env, "response cosmetics.addAll");
+-            }
+-        }
+-    }
+-    if (!installedInPlace && cosmeticsField) {
+-        env->SetObjectField(responseObject, cosmeticsField, catalogList);
+-        installedInPlace = !clearException(env, "response cosmetics field install");
+-    }
+-    logLine(std::string("UNLOCK_RESPONSE_LIST ") + (installedInPlace ? "succeeded" : "failed"));
+-
+-    if (userField && ownedObject) {
+-        env->SetObjectField(responseObject, userField, ownedObject);
+-        if (!clearException(env, "response userCosmetics field install")) logLine("UNLOCK_RESPONSE_USER succeeded");
+-    }
+-    if (cacheField && mapClass) {
+-        jobject cache = env->GetObjectField(responseObject, cacheField);
+-        if (cache) {
+-            jmethodID clear = env->GetMethodID(mapClass, "clear", "()V");
+-            if (clear) {
+-                env->CallVoidMethod(cache, clear);
+-                if (!clearException(env, "response ownedCosmeticCache.clear")) logLine("UNLOCK_RESPONSE_CACHE cleared");
+-            }
+-            env->DeleteLocalRef(cache);
+-        }
+-    }
+-    if (currentList) env->DeleteLocalRef(currentList);
+-    if (mapClass) env->DeleteLocalRef(mapClass);
+-    env->DeleteLocalRef(listClass);
+-    env->DeleteLocalRef(responseClass);
+-}
++#include "spray_support.inl"
+ 
+ void inspectCosmeticsManager(JNIEnv* env, jobject manager) {
+     logLine("COSMETICS_MANAGER_INSTANCE class=" + objectClassName(env, manager));
+@@ -922,7 +865,12 @@
+             jmethodID latest = bklass ? env->GetMethodID(bklass, "bwR", "()Ljava/util/List;") : nullptr;
+             jobject list = all ? env->CallObjectMethod(value, all) : nullptr;
+             if (!clearException(env, "response.b.buL")) {
+-                dumpList(env, "response.b.buL", list);
++                if (list) {
++                    jobject merged = buildSprayCatalog(env, manager, list);
++                    env->DeleteLocalRef(list);
++                    list = merged;
++                }
++                dumpList(env, "response.b.buL + registered sprays", list);
+                 if (list) {
+                     prepareSelectionPersistence(env, list);
+                     // Keep every catalog entry visible, but start with all
+@@ -957,11 +905,13 @@
+                                 if (!synchronizeCosmeticsManager(env, manager, currentUser)) {
+                                     logLine("UNLOCK_MANAGER_SYNC failed during install");
+                                 }
+-                                installOwnedCatalog(env, responseObject, list, currentUser);
+-                                g_catalogReady = true;
+-                                g_unlockInstalled = true;
+-                                logLine("UNLOCK_DIRECT response state");
+-                                inspectCosmeticsPublicApi(env, responseObject);
++                                if (installOwnedCatalog(env, responseObject, list, currentUser)) {
++                                    g_catalogReady = true;
++                                    g_unlockInstalled = true;
++                                    logLine("UNLOCK_DIRECT response state");
++                                    verifySprayOwnership(env, manager);
++                                    inspectCosmeticsPublicApi(env, responseObject);
++                                }
+                             } else {
+                                 logLine("UNLOCK_EXPAND_WRAPPER failed");
+                             }
+@@ -972,7 +922,7 @@
+                         if (responseClass) env->DeleteLocalRef(responseClass);
+                         env->DeleteLocalRef(responseObject);
+                     }
+-                    finalizeSelectionPersistence(env, list);
++                    if (g_unlockInstalled) finalizeSelectionPersistence(env, list);
+                     env->DeleteLocalRef(list);
+                 }
+             }
+--- baseline/README.md
++++ current/README.md
+@@ -28,6 +28,28 @@
+    ```
+ 
+ 3. 注入成功后，在游戏菜单打开 `Cosmetics`，进入 `All Cosmetics`。页面会读取完整目录，点击任意有资源预览的饰品即可在右侧本地模型显示。
++
++## 喷漆支持（本地补丁）
++
++喷漆补丁位于 `spray_support.inl`，由 `agent.cpp` 包含；这是构建必需的源码，分发源码时不能遗漏。补丁从当前进程的喷漆资源注册表补全目录，同时构造完整的拥有列表和按类型缓存。它不会将全部喷漆设为启用，也不会直接覆盖喷漆槽位。
++
++在 `v4.4.4-f8775e4-PRODUCTION4 (1.8.9)` 上，运行时注册表有 **253** 个喷漆；此数量是当前版本的观测结果，不是硬编码的 ID 范围。商店已有条目及原拥有的、商店缺少的喷漆对象会保留，新增条目的 ID 和名称来自已加载的资源注册表。
++
++使用方式：
++
++1. 注入后，如果 `Cosmetics` 已经打开，请先关闭整个页面，再重新进入 `Your Cosmetics → Sprays`；旧页面可能缓存原来的目录。
++2. 回到游戏按 `U` 打开喷漆配置，先选轮盘里的空槽位，再点右侧 `Available Sprays` 中的喷漆。使用自定义键位时以菜单显示为准。
++3. 按 `Y` 打开轮盘，选择已保存的喷漆。这里的槽位使用 Badlion 当前 Mod Profile 自己的保存机制，与下文 `selection-v1.txt` 中的普通饰品启用状态不同。
++4. 如果按 `U` 弹出输入法组合框而不是游戏菜单，先取消组合输入、切换为英文输入再按键。
++
++2026-09-06 的验证范围：
++
++- 已通过：真实拥有接口 `i(SPRAY)` 返回 253 项；槽位所有权校验接受样本 ID `0 / 40 / 169 / 252`，拒绝 `-1 / 1000000`。
++- 已通过：重新打开的喷漆分类和 `U` 菜单显示新增喷漆及纹理；通过游戏界面将 Black Cat（ID `0`）保存到第 2 槽，原第 1 槽 Badlion（ID `40`）保留；`Y` 轮盘正确显示两项。
++- **尚未通过最终验收**：方块表面的实际放置/世界渲染，以及重启客户端后只注入发布版的干净复现。不能把菜单出现、槽位保存或发送日志当作喷涂成功。
++- 不代表服务端拥有状态发生变化，也不保证其他玩家可见。
++
++目前运行中的 JVM 如果已经注入旧/测试 DLL，不要再重复注入新 DLL；请正常保存退出并重新启动游戏后再测试发布版。测试截图和精简记录见本地 `analysis/spray`（无需随单文件程序分发）。
+ 
+ ## 本地选择保存
+ 
+--- baseline/spray_support.inl
++++ current/spray_support.inl
+@@ -0,0 +1,172 @@
++// Included inside agent.cpp's anonymous namespace. Runtime contract verified
++// against 4.4.4-f8775e4: aFM.X(id)/ed.V read response.buL(), not aDp's
++// active-only buckets. Never turn every spray active or overwrite spray slots.
++struct SprayLocalFrame {
++    JNIEnv* env;
++    bool valid;
++    explicit SprayLocalFrame(JNIEnv* e) : env(e), valid(e->PushLocalFrame(96) == JNI_OK) {}
++    ~SprayLocalFrame() { if (valid) env->PopLocalFrame(nullptr); }
++    jobject keep(jobject value) { valid = false; return env->PopLocalFrame(value); }
++};
++
++// Copy the store list, reuse existing aCV objects, retain owned spray metadata,
++// then add ONLY ids already registered in the live spray renderer. No hardcoded
++// id range, asset edits, downloads or account/server mutation.
++jobject buildSprayCatalog(JNIEnv* env, jobject manager, jobject storeCatalog) {
++    SprayLocalFrame frame(env);
++    if (!frame.valid || !manager || !storeCatalog) return nullptr;
++    jclass lc = env->FindClass("java/util/List");
++    jclass ac = env->FindClass("java/util/ArrayList");
++    jclass mc = env->FindClass("java/util/Map");
++    jclass cc = env->FindClass("java/util/Collection");
++    jclass managerClass = env->GetObjectClass(manager);
++    jclass cv = env->FindClass("net/badlion/a/aCV");
++    jclass ni = env->FindClass("net/badlion/a/aNI");
++    jclass fm = env->FindClass("net/badlion/a/aFM");
++    jclass fk = env->FindClass("net/badlion/a/aFK");
++    jclass rc = env->FindClass("net/badlion/clientcommon/type/cosmetics/response/a");
++    if (clearException(env, "spray catalog classes") || !lc || !ac || !mc || !cc || !managerClass || !cv || !ni || !fm || !fk || !rc) return nullptr;
++    auto copy = env->GetMethodID(ac, "<init>", "(Ljava/util/Collection;)V");
++    auto size = env->GetMethodID(lc, "size", "()I");
++    auto get = env->GetMethodID(lc, "get", "(I)Ljava/lang/Object;");
++    auto add = env->GetMethodID(lc, "add", "(Ljava/lang/Object;)Z");
++    auto values = env->GetMethodID(mc, "values", "()Ljava/util/Collection;");
++    auto toArray = env->GetMethodID(cc, "toArray", "()[Ljava/lang/Object;");
++    auto getSprays = env->GetMethodID(managerClass, "bsF", "()Lnet/badlion/a/aFM;");
++    auto getResponse = env->GetMethodID(managerClass, "bsd", "()Lnet/badlion/clientcommon/type/cosmetics/response/a;");
++    auto all = env->GetMethodID(rc, "buL", "()Ljava/util/List;");
++    auto registry = env->GetMethodID(fm, "bwK", "()Ljava/util/Map;");
++    auto sprayId = env->GetMethodID(fk, "brv", "()I");
++    auto sprayName = env->GetMethodID(fk, "bwk", "()Ljava/lang/String;");
++    auto type = env->GetFieldID(cv, "cosmeticType", "Lnet/badlion/a/aNI;");
++    auto id = env->GetFieldID(cv, "cosmeticId", "I");
++    auto name = env->GetFieldID(cv, "name", "Ljava/lang/String;");
++    auto ctor = env->GetMethodID(cv, "<init>", "(ILnet/badlion/a/aNI;Lcom/google/gson/JsonObject;)V");
++    auto sprayField = env->GetStaticFieldID(ni, "SPRAY", "Lnet/badlion/a/aNI;");
++    if (clearException(env, "spray catalog members") || !copy || !size || !get || !add || !values || !toArray || !getSprays || !getResponse || !all || !registry || !sprayId || !sprayName || !type || !id || !name || !ctor || !sprayField) return nullptr;
++    jobject spray = env->GetStaticObjectField(ni, sprayField);
++    jobject result = env->NewObject(ac, copy, storeCatalog);
++    jobject sm = env->CallObjectMethod(manager, getSprays);
++    jobject registered = sm ? env->CallObjectMethod(sm, registry) : nullptr;
++    jobject collection = registered ? env->CallObjectMethod(registered, values) : nullptr;
++    auto entries = collection ? static_cast<jobjectArray>(env->CallObjectMethod(collection, toArray)) : nullptr;
++    if (clearException(env, "spray registry snapshot") || !result || !spray || !entries) return nullptr;
++    const jsize registeredCount = env->GetArrayLength(entries);
++    if (registeredCount == 0) { logLine("SPRAY_CATALOG waiting for registered resources"); return nullptr; }
++    std::set<jint> seen;
++    auto collect = [&](jobject list, bool append) {
++        if (!list) return true;
++        const jint count = env->CallIntMethod(list, size);
++        if (clearException(env, "spray source size")) return false;
++        for (jint i = 0; i < count; ++i) {
++            jobject item = env->CallObjectMethod(list, get, i);
++            if (clearException(env, "spray source item")) return false;
++            if (!item || !env->IsInstanceOf(item, cv)) { if (item) env->DeleteLocalRef(item); continue; }
++            jobject kind = env->GetObjectField(item, type);
++            if (env->IsSameObject(kind, spray)) {
++                const jint key = env->GetIntField(item, id);
++                if (seen.insert(key).second && append) env->CallBooleanMethod(result, add, item);
++            }
++            if (kind) env->DeleteLocalRef(kind); env->DeleteLocalRef(item);
++            if (clearException(env, "spray merge existing")) return false;
++        }
++        return true;
++    };
++    if (!collect(result, false)) return nullptr;
++    const size_t storeSprays = seen.size();
++    jobject response = env->CallObjectMethod(manager, getResponse);
++    jobject owned = response ? env->CallObjectMethod(response, all) : nullptr;
++    if (clearException(env, "spray owned source") || !collect(owned, true)) return nullptr;
++    size_t created = 0;
++    for (jsize i = 0; i < registeredCount; ++i) {
++        jobject resource = env->GetObjectArrayElement(entries, i);
++        if (!resource || !env->IsInstanceOf(resource, fk)) return nullptr;
++        const jint key = env->CallIntMethod(resource, sprayId);
++        if (clearException(env, "registered spray id")) return nullptr;
++        if (key >= 0 && seen.insert(key).second) {
++            jobject item = env->NewObject(cv, ctor, key, spray, nullptr);
++            if (clearException(env, "new local spray descriptor") || !item) return nullptr;
++            jobject label = env->CallObjectMethod(resource, sprayName);
++            if (clearException(env, "registered spray name")) return nullptr;
++            env->SetObjectField(item, name, label);
++            env->CallBooleanMethod(result, add, item);
++            if (clearException(env, "append local spray")) return nullptr;
++            if (label) env->DeleteLocalRef(label); env->DeleteLocalRef(item); ++created;
++        }
++        env->DeleteLocalRef(resource);
++    }
++    logLine("SPRAY_CATALOG store=" + std::to_string(storeSprays) + " registered=" + std::to_string(registeredCount) +
++            " created=" + std::to_string(created) + " total=" + std::to_string(seen.size()));
++    return frame.keep(result);
++}
++
++// Stage complete list/cache off to the side. Emptying a cache without setting
++// needsUpdate left response.i(SPRAY) empty in the old implementation.
++bool installOwnedCatalog(JNIEnv* env, jobject response, jobject catalog, jobject wrapper) {
++    SprayLocalFrame frame(env);
++    if (!frame.valid || !response || !catalog || !wrapper) return false;
++    jclass rc = env->GetObjectClass(response);
++    jclass lc = env->FindClass("java/util/List");
++    jclass ac = env->FindClass("java/util/ArrayList");
++    jclass mc = env->FindClass("java/util/HashMap");
++    jclass cv = env->FindClass("net/badlion/a/aCV");
++    jclass ab = env->FindClass("java/util/concurrent/atomic/AtomicBoolean");
++    if (clearException(env, "owned snapshot classes") || !rc || !lc || !ac || !mc || !cv || !ab) return false;
++    auto lf = env->GetFieldID(rc, "cosmetics", "Ljava/util/List;");
++    auto uf = env->GetFieldID(rc, "userCosmetics", "Lnet/badlion/a/aDp;");
++    auto cf = env->GetFieldID(rc, "ownedCosmeticCache", "Ljava/util/Map;");
++    auto nf = env->GetFieldID(rc, "needsUpdate", "Ljava/util/concurrent/atomic/AtomicBoolean;");
++    auto tf = env->GetFieldID(cv, "cosmeticType", "Lnet/badlion/a/aNI;");
++    auto copy = env->GetMethodID(ac, "<init>", "(Ljava/util/Collection;)V");
++    auto empty = env->GetMethodID(ac, "<init>", "()V");
++    auto makeMap = env->GetMethodID(mc, "<init>", "()V");
++    auto size = env->GetMethodID(lc, "size", "()I");
++    auto get = env->GetMethodID(lc, "get", "(I)Ljava/lang/Object;");
++    auto add = env->GetMethodID(lc, "add", "(Ljava/lang/Object;)Z");
++    auto lookup = env->GetMethodID(mc, "get", "(Ljava/lang/Object;)Ljava/lang/Object;");
++    auto put = env->GetMethodID(mc, "put", "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
++    auto set = env->GetMethodID(ab, "set", "(Z)V");
++    if (clearException(env, "owned snapshot members") || !lf || !uf || !cf || !nf || !tf || !copy || !empty || !makeMap || !size || !get || !add || !lookup || !put || !set) return false;
++    jobject list = env->NewObject(ac, copy, catalog);
++    jobject cache = env->NewObject(mc, makeMap);
++    jobject needsUpdate = env->GetObjectField(response, nf);
++    if (clearException(env, "owned snapshot allocate") || !list || !cache || !needsUpdate) return false;
++    const jint count = env->CallIntMethod(list, size);
++    for (jint i = 0; i < count; ++i) {
++        jobject item = env->CallObjectMethod(list, get, i);
++        if (clearException(env, "owned snapshot item") || !item || !env->IsInstanceOf(item, cv)) return false;
++        jobject type = env->GetObjectField(item, tf);
++        jobject bucket = env->CallObjectMethod(cache, lookup, type);
++        if (clearException(env, "owned snapshot bucket") || !type) return false;
++        if (!bucket) {
++            bucket = env->NewObject(ac, empty);
++            if (clearException(env, "owned snapshot new bucket") || !bucket) return false;
++            jobject previous = env->CallObjectMethod(cache, put, type, bucket);
++            if (previous) env->DeleteLocalRef(previous);
++        }
++        env->CallBooleanMethod(bucket, add, item);
++        if (clearException(env, "owned snapshot add")) return false;
++        env->DeleteLocalRef(bucket); env->DeleteLocalRef(type); env->DeleteLocalRef(item);
++    }
++    env->SetObjectField(response, lf, list);
++    env->SetObjectField(response, uf, wrapper);
++    env->SetObjectField(response, cf, cache);
++    env->CallVoidMethod(needsUpdate, set, JNI_FALSE);
++    const bool ok = !clearException(env, "owned snapshot publish");
++    logLine(std::string("UNLOCK_RESPONSE_SNAPSHOT ") + (ok ? "succeeded" : "failed") + " total=" + std::to_string(count));
++    return ok;
++}
++
++// Narrow authoritative ownership predicate used by ed.V() when saving slots.
++void verifySprayOwnership(JNIEnv* env, jobject manager) {
++    SprayLocalFrame frame(env); if (!frame.valid) return;
++    jclass fm = env->FindClass("net/badlion/a/aFM");
++    if (clearException(env, "spray verification class") || !fm) return;
++    auto allowed = env->GetStaticMethodID(fm, "X", "(I)Z");
++    if (clearException(env, "spray verification method") || !allowed) return;
++    for (jint id : {0, 40, 169, 252, -1, 1000000}) {
++        const bool ok = env->CallStaticBooleanMethod(fm, allowed, id) == JNI_TRUE;
++        if (clearException(env, "spray ownership predicate")) return;
++        logLine("SPRAY_OWNERSHIP id=" + std::to_string(id) + " allowed=" + std::to_string(ok));
++    }
++}
